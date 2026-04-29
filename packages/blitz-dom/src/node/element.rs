@@ -93,6 +93,7 @@ pub enum SpecialElementData {
     /// A custom widget
     #[cfg(feature = "custom-widget")]
     CustomWidget(CustomWidgetData),
+    CrossOriginIframe(u64),
     /// A stylesheet
     Stylesheet(DocumentStyleSheet),
     /// An \<img\> element's image data
@@ -119,6 +120,7 @@ impl Clone for SpecialElementData {
             Self::SubDocument(_) => Self::None, // TODO
             #[cfg(feature = "custom-widget")]
             Self::CustomWidget(_) => Self::None, // TODO
+            Self::CrossOriginIframe(data) => Self::CrossOriginIframe(*data),
             Self::Stylesheet(data) => Self::Stylesheet(data.clone()),
             Self::Image(data) => Self::Image(data.clone()),
             Self::Canvas(data) => Self::Canvas(data.clone()),
@@ -230,6 +232,13 @@ impl ElementData {
     pub fn sub_doc_data_mut(&mut self) -> Option<&mut dyn Document> {
         match &mut self.special_data {
             SpecialElementData::SubDocument(data) => Some(data.as_mut()),
+            _ => None,
+        }
+    }
+
+    pub fn cross_origin_iframe_data(&self) -> Option<u64> {
+        match self.special_data {
+            SpecialElementData::CrossOriginIframe(data) => Some(data),
             _ => None,
         }
     }
@@ -436,6 +445,10 @@ impl ElementData {
         self.special_data = SpecialElementData::SubDocument(sub_document);
     }
 
+    pub fn set_cross_origin_iframe(&mut self, frame_id: u64) {
+        self.special_data = SpecialElementData::CrossOriginIframe(frame_id);
+    }
+
     pub fn remove_sub_document(&mut self) {
         self.special_data = SpecialElementData::None;
     }
@@ -454,6 +467,11 @@ impl ElementData {
             .unwrap_or_default();
         self.special_data = SpecialElementData::None;
         resource_ids
+    
+    pub fn remove_cross_origin_iframe(&mut self) {
+        if matches!(self.special_data, SpecialElementData::CrossOriginIframe(_)) {
+            self.special_data = SpecialElementData::None;
+        }
     }
 
     pub fn take_inline_layout(&mut self) -> Option<Box<TextLayout>> {
@@ -580,6 +598,9 @@ impl std::fmt::Debug for SpecialElementData {
             SpecialElementData::SubDocument(_) => f.write_str("NodeSpecificData::SubDocument"),
             #[cfg(feature = "custom-widget")]
             SpecialElementData::CustomWidget(_) => f.write_str("NodeSpecificData::CustomWidget"),
+            SpecialElementData::CrossOriginIframe(_) => {
+                f.write_str("NodeSpecificData::CrossOriginIframe")
+            }
             SpecialElementData::Stylesheet(_) => f.write_str("NodeSpecificData::Stylesheet"),
             SpecialElementData::Image(data) => match **data {
                 ImageData::Raster(_) => f.write_str("NodeSpecificData::Image(Raster)"),
