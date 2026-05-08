@@ -19,7 +19,7 @@ use anyrender::Scene as RenderScene;
 use blitz_dom::{BaseDocument, DocumentConfig, NodeData};
 use blitz_paint::paint_scene;
 use blitz_traits::net::{Body, Bytes, NetHandler, NetProvider, Request};
-use blitz_traits::shell::{ColorScheme, Viewport};
+use blitz_traits::shell::{ClipboardError, ColorScheme, ShellProvider, Viewport};
 use data_url::DataUrl;
 use ipc_channel::ipc::{self, IpcSender};
 use ipc_messages::content::Command::{
@@ -28,7 +28,8 @@ use ipc_messages::content::Command::{
     SetViewport, Shutdown, UpdateTheRendering,
 };
 use ipc_messages::content::{
-    Bootstrap, ColorScheme as MessageColorScheme, Command, DispatchEventEntry,
+    Bootstrap, ClipboardReadRequest, ClipboardWriteRequest,
+    ColorScheme as MessageColorScheme, Command, DispatchEventEntry,
     Event as ContentEvent, FetchRequest as ContentFetchRequest,
     FetchResponse as ContentFetchResponse, FontTransportSender, FrameId,
     LoadedDocumentResponse, PaintFrame, RecordedScene, ScriptEvaluationResult,
@@ -106,6 +107,47 @@ struct LocalContentState {
 }
 
 type LocalContentStateRef = Arc<Mutex<LocalContentState>>;
+
+struct ContentShellProvider {
+    event_sender: IpcSender<ContentEvent>,
+}
+
+impl ContentShellProvider {
+    fn new(event_sender: IpcSender<ContentEvent>) -> Self {
+        Self { event_sender }
+    }
+}
+
+impl ShellProvider for ContentShellProvider {
+    fn get_clipboard_text(&self) -> Result<String, ClipboardError> {
+        let (reply_sender, reply_receiver) =
+            ipc::channel::<Result<String, String>>().map_err(|_| ClipboardError)?;
+        self.event_sender
+            .send(ContentEvent::ClipboardReadRequested(ClipboardReadRequest {
+                reply_sender,
+            }))
+            .map_err(|_| ClipboardError)?;
+        reply_receiver
+            .recv()
+            .map_err(|_| ClipboardError)?
+            .map_err(|_| ClipboardError)
+    }
+
+    fn set_clipboard_text(&self, text: String) -> Result<(), ClipboardError> {
+        let (reply_sender, reply_receiver) =
+            ipc::channel::<Result<(), String>>().map_err(|_| ClipboardError)?;
+        self.event_sender
+            .send(ContentEvent::ClipboardWriteRequested(ClipboardWriteRequest {
+                text,
+                reply_sender,
+            }))
+            .map_err(|_| ClipboardError)?;
+        reply_receiver
+            .recv()
+            .map_err(|_| ClipboardError)?
+            .map_err(|_| ClipboardError)
+    }
+}
 
 enum DeferredScriptState {
     Inline { source: String },
@@ -387,6 +429,9 @@ impl ContentRuntime {
                 local_state: Arc::clone(&self.local_state),
                 content_document_id: document_id,
             })),
+            shell_provider: Some(Arc::new(ContentShellProvider::new(
+                self.event_sender.clone(),
+            ))),
             html_parser_provider: Some(Arc::new(JsHtmlParserProvider)),
             ..DocumentConfig::default()
         }
@@ -1230,4 +1275,65 @@ fn main() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    #[test]
+    fn content_shell_provider_requests_clipboard_reads_over_ipc() {
+        let (event_sender, event_receiver) =
+            ipc::channel::<ContentEvent>().expect("content clipboard test channel should open");
+        let provider = ContentShellProvider::new(event_sender);
+
+        let responder = thread::spawn(move || {
+            let event = event_receiver
+                .recv()
+                .expect("content clipboard test should receive a request");
+            match event {
+                ContentEvent::ClipboardReadRequested(request) => request
+                    .reply_sender
+                    .send(Ok(String::from("from-embedder")))
+                    .expect("content clipboard test should send a reply"),
+                other => panic!("unexpected clipboard event: {other:?}"),
+            }
+        });
+
+        let result = provider.get_clipboard_text();
+        assert!(result.is_ok());
+        assert_eq!(result.ok().as_deref(), Some("from-embedder"));
+        responder
+            .join()
+            .expect("content clipboard responder should join cleanly");
+    }
+
+    #[test]
+    fn content_shell_provider_requests_clipboard_writes_over_ipc() {
+        let (event_sender, event_receiver) =
+            ipc::channel::<ContentEvent>().expect("content clipboard test channel should open");
+        let provider = ContentShellProvider::new(event_sender);
+
+        let responder = thread::spawn(move || {
+            let event = event_receiver
+                .recv()
+                .expect("content clipboard test should receive a request");
+            match event {
+                ContentEvent::ClipboardWriteRequested(request) => {
+                    assert_eq!(request.text, "to-embedder");
+                    request
+                        .reply_sender
+                        .send(Ok(()))
+                        .expect("content clipboard test should send a reply");
+                }
+                other => panic!("unexpected clipboard event: {other:?}"),
+            }
+        });
+
+        assert!(provider.set_clipboard_text(String::from("to-embedder")).is_ok());
+        responder
+            .join()
+            .expect("content clipboard responder should join cleanly");
+    }
 }

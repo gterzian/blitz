@@ -17,6 +17,7 @@ const RENDERING_OPPORTUNITY_FOR_MESSAGE_PREFIX: &str = "RenderingOpportunityFor|
 pub struct WebviewState {
     pub compositor: Compositor,
     pub current_navigable_id: Option<u64>,
+    focused_frame_id: Option<FrameId>,
 }
 
 impl Default for WebviewState {
@@ -24,6 +25,7 @@ impl Default for WebviewState {
         Self {
             compositor: Compositor::default(),
             current_navigable_id: None,
+            focused_frame_id: None,
         }
     }
 }
@@ -239,6 +241,7 @@ impl WebviewProvider {
         let state = self.webviews.entry(webview_id).or_default();
         state.compositor.note_navigation_finalized();
         state.current_navigable_id = None;
+        state.focused_frame_id = None;
     }
 
     pub fn on_new_top_level_traversable(&mut self, webview_id: WebviewId) {
@@ -268,9 +271,36 @@ impl WebviewProvider {
         event: UiEvent,
     ) -> (WebviewId, UiEvent, Vec<FrameId>) {
         let viewport_scale = self.embedder.viewport_scale_factor().max(1.0);
+        let is_pointer_down = matches!(&event, UiEvent::PointerDown(_));
         let Some((client_x, client_y)) = ui_event_client_position(&event) else {
-            let composed_frame_ids = self.composed_frame_ids(root_webview_id);
-            return (root_webview_id, event, composed_frame_ids);
+            let (target_frame_id, composed_frame_ids, viewports) = {
+                let Some(state) = self.webviews.get_mut(&root_webview_id) else {
+                    return (root_webview_id, event, Vec::new());
+                };
+                let root_frame_id = state.compositor.committed_root_frame_id();
+                let viewports = state.compositor.visible_frame_viewports(&self.font_receiver);
+                let composed_frame_ids = composition_frame_ids(root_frame_id, &viewports);
+                let target_frame_id = state
+                    .focused_frame_id
+                    .filter(|frame_id| composed_frame_ids.contains(frame_id))
+                    .or(root_frame_id);
+                state.focused_frame_id = target_frame_id;
+                (target_frame_id, composed_frame_ids, viewports)
+            };
+            self.publish_visible_child_viewports(viewports);
+            let target_webview_id = target_frame_id
+                .map(|frame_id| self.webview_id_for_frame(root_webview_id, frame_id))
+                .unwrap_or(root_webview_id);
+            if input_debug_enabled() {
+                eprintln!(
+                    "[input-debug][webview] root={} frame={} child={} target={} nonpositional=true",
+                    root_webview_id.0,
+                    target_frame_id.map(|frame_id| frame_id.0).unwrap_or(root_webview_id.0),
+                    target_frame_id.is_some_and(|frame_id| frame_id != FrameId(root_webview_id.0)),
+                    target_webview_id.0,
+                );
+            }
+            return (target_webview_id, event, composed_frame_ids);
         };
 
         let (root_frame_id, hit, viewports) = {
@@ -289,6 +319,11 @@ impl WebviewProvider {
         let composed_frame_ids = composition_frame_ids(root_frame_id, &viewports);
 
         let Some(hit) = hit else {
+            if is_pointer_down
+                && let Some(state) = self.webviews.get_mut(&root_webview_id)
+            {
+                state.focused_frame_id = root_frame_id;
+            }
             self.publish_visible_child_viewports(viewports);
             if input_debug_enabled() {
                 eprintln!(
@@ -302,6 +337,11 @@ impl WebviewProvider {
 
         let target_webview_id = self.webview_id_for_frame(root_webview_id, hit.frame_id);
         let routed_event = retarget_ui_event_for_hit(event, hit, &viewports, viewport_scale);
+        if is_pointer_down
+            && let Some(state) = self.webviews.get_mut(&root_webview_id)
+        {
+            state.focused_frame_id = Some(hit.frame_id);
+        }
         self.publish_visible_child_viewports(viewports);
         if input_debug_enabled() {
             let logical_local_x = hit.local_x / viewport_scale;
@@ -339,20 +379,6 @@ impl WebviewProvider {
                 viewport.offset_y / viewport_scale,
             );
         }
-    }
-
-    fn composed_frame_ids(&mut self, root_webview_id: WebviewId) -> Vec<FrameId> {
-        let (root_frame_id, viewports) = {
-            let Some(state) = self.webviews.get_mut(&root_webview_id) else {
-                return Vec::new();
-            };
-            let root_frame_id = state.compositor.committed_root_frame_id();
-            let viewports = state.compositor.visible_frame_viewports(&self.font_receiver);
-            (root_frame_id, viewports)
-        };
-        let frame_ids = composition_frame_ids(root_frame_id, &viewports);
-        self.publish_visible_child_viewports(viewports);
-        frame_ids
     }
 
     fn note_rendering_opportunities(
@@ -438,6 +464,127 @@ fn ui_event_client_position(event: &UiEvent) -> Option<(f32, f32)> {
         | UiEvent::KeyDown(_)
         | UiEvent::Ime(_)
         | UiEvent::AppleStandardKeybinding(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyrender::recording::{PlaceholderCommand, PlaceholderKind, RenderCommand};
+    use blitz_traits::events::{
+        BlitzKeyEvent, BlitzPointerEvent, BlitzPointerId, KeyState, MouseEventButton,
+        MouseEventButtons, PointerCoords, PointerDetails,
+    };
+    use ipc_messages::content::{RecordedScene, SerializableRenderCommand};
+    use keyboard_types::{Code, Key, Location, Modifiers};
+    use kurbo::{Affine, Rect, Shape};
+
+    const ROOT_WEBVIEW_ID: WebviewId = WebviewId(1);
+    const ROOT_FRAME_ID: FrameId = FrameId(1);
+    const CHILD_WEBVIEW_ID: WebviewId = WebviewId(2);
+    const CHILD_FRAME_ID: FrameId = FrameId(1_u64 << 63);
+
+    struct TestEmbedder;
+
+    impl EmbedderApi for TestEmbedder {
+        fn request_redraw(&self, _webview_id: WebviewId) {}
+
+        fn viewport_scale_factor(&self) -> f32 {
+            1.0
+        }
+
+        fn update_traversable_viewport(
+            &self,
+            _traversable_id: WebviewId,
+            _width: u32,
+            _height: u32,
+            _offset_x: f32,
+            _offset_y: f32,
+        ) {
+        }
+    }
+
+    fn empty_scene() -> RecordedScene {
+        RecordedScene {
+            tolerance: 0.1,
+            font_ids: Vec::new(),
+            commands: Vec::new(),
+        }
+    }
+
+    fn root_scene_with_child_placeholder() -> RecordedScene {
+        let clip = Rect::new(0.0, 0.0, 100.0, 50.0).into_path(0.1);
+        RecordedScene {
+            tolerance: 0.1,
+            font_ids: Vec::new(),
+            commands: vec![SerializableRenderCommand(RenderCommand::Placeholder(
+                PlaceholderCommand {
+                    kind: PlaceholderKind::CrossOriginIframe {
+                        frame_id: CHILD_FRAME_ID.0,
+                    },
+                    transform: Affine::translate((50.0, 60.0)),
+                    clip,
+                },
+            ))],
+        }
+    }
+
+    fn pointer_down(client_x: f32, client_y: f32) -> UiEvent {
+        UiEvent::PointerDown(BlitzPointerEvent {
+            id: BlitzPointerId::Mouse,
+            is_primary: true,
+            coords: PointerCoords {
+                page_x: client_x,
+                page_y: client_y,
+                screen_x: client_x,
+                screen_y: client_y,
+                client_x,
+                client_y,
+            },
+            button: MouseEventButton::Main,
+            buttons: MouseEventButtons::Primary,
+            mods: Modifiers::default(),
+            details: PointerDetails::default(),
+        })
+    }
+
+    fn key_down() -> UiEvent {
+        UiEvent::KeyDown(BlitzKeyEvent {
+            key: Key::Character("v".into()),
+            code: Code::KeyV,
+            modifiers: Modifiers::default(),
+            location: Location::Standard,
+            is_auto_repeating: false,
+            is_composing: false,
+            state: KeyState::Pressed,
+            text: Some("v".into()),
+        })
+    }
+
+    #[test]
+    fn key_events_follow_last_focused_child_frame() {
+        let mut provider = WebviewProvider::new(Arc::new(TestEmbedder));
+        provider.webviews.insert(ROOT_WEBVIEW_ID, WebviewState::default());
+        provider.register_child_navigable_host(
+            CHILD_WEBVIEW_ID,
+            ROOT_WEBVIEW_ID,
+            CHILD_FRAME_ID,
+        );
+        let state = provider
+            .webviews
+            .get_mut(&ROOT_WEBVIEW_ID)
+            .expect("root webview should exist");
+        state
+            .compositor
+            .store_frame(ROOT_FRAME_ID, 400, 300, root_scene_with_child_placeholder());
+        state.compositor.store_frame(CHILD_FRAME_ID, 100, 50, empty_scene());
+
+        let (pointer_target, _, _) =
+            provider.route_ui_event(ROOT_WEBVIEW_ID, pointer_down(75.0, 80.0));
+        assert_eq!(pointer_target, CHILD_WEBVIEW_ID);
+
+        let (key_target, _, _) = provider.route_ui_event(ROOT_WEBVIEW_ID, key_down());
+        assert_eq!(key_target, CHILD_WEBVIEW_ID);
     }
 }
 
