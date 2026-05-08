@@ -394,6 +394,7 @@ impl DocumentMutator<'_> {
     #[cfg(feature = "custom-widget")]
     pub fn remove_custom_widget(&mut self, node_id: usize) {
         self.doc.remove_custom_widget(node_id)
+    }
     
     pub fn remove_cross_origin_iframe(&mut self, node_id: usize) {
         self.doc.remove_cross_origin_iframe(node_id)

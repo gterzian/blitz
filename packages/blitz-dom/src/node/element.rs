@@ -467,6 +467,7 @@ impl ElementData {
             .unwrap_or_default();
         self.special_data = SpecialElementData::None;
         resource_ids
+    }
     
     pub fn remove_cross_origin_iframe(&mut self) {
         if matches!(self.special_data, SpecialElementData::CrossOriginIframe(_)) {
