@@ -1,93 +1,126 @@
-# formal-web
+<p>
+<picture >
+  <source media="(prefers-color-scheme: dark)" srcset="https://blitz-website.fly.dev/static/blitz-logo-with-text3-white.svg">
+  <img height="70" alt="Blitz" src="https://blitz-website.fly.dev/static/blitz-logo-with-text3.svg">
+</picture>
+</p>
 
-formal-web runs a verified Lean kernel dealing with all engine-wide coordination(navigation, session history, etc...), coupled with individual Rust modules for things like running HTML event-loop tasks, managing the DOM, a winit embedder, a window renderer, and other things interfacing with the outside world.
+**A [radically modular](https://github.com/DioxusLabs/blitz?tab=readme-ov-file#architecture) HTML/CSS rendering engine**
 
----
+[![Build Status](https://github.com/dioxuslabs/blitz/actions/workflows/ci.yml/badge.svg)](https://github.com/dioxuslabs/blitz/actions)
+[![Crates.io](https://img.shields.io/crates/v/blitz.svg)](https://crates.io/crates/blitz)
+[![Docs](https://docs.rs/blitz/badge.svg)](https://docs.rs/blitz)
+[![Crates.io License](https://img.shields.io/crates/l/blitz)](#license)
+[![dependency status](https://deps.rs/repo/github/dioxuslabs/blitz/status.svg)](https://deps.rs/repo/github/dioxuslabs/blitz)
 
-![formal-web architecture](formal-web-diagram.svg)
+Talk to us in: the [#native](https://discord.gg/AnNPqT95pu) channel in the [Dioxus Discord](https://discord.gg/AnNPqT95pu)
 
----
+## Status
 
-## The problem
+Blitz is currently in a **pre-alpha** state. It already has a very capable renderer, but there are also still many bugs and missing features. We are actively working on bringing it into a usable state but we would not yet recommend building apps with it.
 
-Some of the hardest bugs in browsers are in the coordination. Navigation races, session history corruption, fetch ordering errors. These are concurrency bugs.
+Check out the [roadmap issue](https://github.com/DioxusLabs/blitz/issues/119) for more details. 
 
-## The approach
+## Screenshot
 
-formal-web moves as much of this logic as possible into a verified Lean kernel. The kernel handles every concurrent decision — navigation, session history, fetch — using formally proven state machines. Rust modules handle the rest: DOM, layout, rendering, JavaScript.
+![screenshot](https://raw.githubusercontent.com/DioxusLabs/screenshots/main/blitz/counter-example.png)
 
----
+> Note: This repo contains a new version of Blitz (v0.2+) which uses Stylo. The source code for the old version (v0.1) is still available on the [legacy](https://github.com/DioxusLabs/blitz/tree/legacy) branch but is not under active development.
 
-## Four pillars
+## Trying it out
 
-### Correctness
+1. Clone this repo
+2. Run our "browser" package:
+    ```sh
+    cargo run --release --package browser
+    ```
+3. Or run an example:
+    - small TODO app
+    ```sh
+    cargo run --release --package todomvc
+    ```
+    - markdown renderer
+    ```sh
+    cargo run --release --package readme ./README.md
+    ```
+    - integration with raw WGPU rendering
+    ```sh
+    cargo run --release --package wgpu_texture
+    ```
 
-The most complicated concurrent algorithms — navigation, session history, fetch — live in the Lean verified kernel. Rust modules are kept as simple as possible, focused purely on interacting with the outside world. Each module is a black box: a sequential function with an input and an output.
+Other examples are available in the [examples/](./examples/) folder.
 
-### Performance
+## Goals
 
-Perceived performance is about latency, not throughput. formal-web ensures the main render path is never blocked. Even with a modest JS engine like Boa, the browser stays snappy. 
+Blitz is designed to render HTML and CSS - we *don't* want to support the entirety of browser features (or at least we want to make all such "extra" features opt-in). In our opinion, the browser is bloated for the basic use case of rendering HTML/CSS.
 
-### Modularity
+We do intend to support:
 
-The engine composes best-in-class open components:
+- Modern HTML layout (flexbox, grid, table, block, inline, absolute/fixed, etc).
+- Advanced CSS (complex selectors, media queries, css variables)
+- HTML Form controls
+- Accessibility using AccessKit
+- Extensibility via custom widgets
 
-- **Blitz** — DOM and layout
-- **Vello** — GPU-accelerated rendering
-- **Wasmtime** — WebAssembly runtime
-- **Boa** — JavaScript engine
+Notably we *don't* provide features like webrtc, websockets, bluetooth, localstorage, etc. In a native app, much of this functionality can be fulfilled using regular Rust crates and doesn't need to be coupled with the renderer.
 
-The Blitz + Vello + anyrender pipeline is naturally composable, supporting advanced use cases like cross-process iframes and media elements with minimal coordination overhead. Anything beyond core web standards — WebNN, WebBluetooth, Web MIDI — is implemented as a plain Rust module, keeping the verified kernel lean and the extension surface explicit.
+We don't yet have Blitz bindings for other languages (JavaScript, Python, etc) but would accept contributions along those lines.
 
-### Security
+## Architecture
 
-The process model is designed to meet Apple's [architectural requirements](https://developer.apple.com/documentation/browserenginekit/designing-your-browser-architecture) for an independent web engine on iOS — from day one:
+Blitz consists of a core DOM abstraction; several modular pieces which provide additional functionality like networking, rendering, windows, and state management; and two high-level wrappers that support rendering either a Dioxus application or HTML with a simplified API.
 
-- **Content processes** (one per tab) — DOM, JavaScript, display list production
-- **Network process** — fetch, TLS
-- **GPU process** — Vello rendering (note: this happens in the main process for now)
-- **Main process** — browser chrome, embedder
----
+These pieces can be combined together to make a cohesive web engine.
 
-## The bet
+### High-level "wrapper" crates
 
-A formally verified core plus composable Rust modules is a tractable path to a correct, secure, and performant web engine.
+- **`blitz`** - An HTML/markdown frontend that can render an HTML string. This is useful for previewing HTML and/or markdown files but currently lacks interactivity.
+<br /><small><b>Uses: `blitz-dom`, `blitz-html`, `blitz-shell`, `blitz-renderer-vello`</b></small>
+- **`dioxus-native`** - A Dioxus frontend that can render a Dioxus VirtualDom. This has full interactivity support via Dioxus's event handling.
+<br /><small><b>Uses: `blitz-dom`, `dioxus-core`, `blitz-shell`, `blitz-renderer-vello`</b></small>
 
-## Requirements
+Both wrappers can optionally use <b>`blitz-net`</b> to fetch sub-resources.
 
-- `elan`
-- `rustup`
-- Rust toolchain `1.92.0`: `rustup toolchain install 1.92.0`
-- `python3`
-- `curl`
-- On macOS, Xcode and the macOS SDK at the path referenced in `lakefile.lean`
 
-## Commands
+### Using the git verison of Dioxus Native
 
-```bash
-rustup run 1.92.0 cargo run --release
-```
+The latest development version of the Dioxus Native lives in this repository. As Dioxus Native is under rapid development it can be useful to use this version to get access to the latest features and bug fixes sooner than they are available in an official release.
 
-`cargo check` builds the Rust workspace and the Lean runtime artifacts needed by the FFI layer.
+To use the git version of `dioxus-native`:
 
-`cargo run --release` starts the Rust embedder, initializes the Lean runtime, starts the Lean kernel, and loads `artifacts/StartupExample.html`.
+- Remove your dependency on the `dioxus` crate entirely.
+- Add `dioxus-native = { git = "https://github.com/DioxusLabs/blitz", rev = "e64a3d8", features = ["prelude"] }`
+- (replace `e64a3d8` with the git commit id of the version you want to use)
+- In your rust code change all instances of `use dioxus::prelude::*` to `use dioxus_native::prelude::*`.
+- If you need to access additonal functionality from the `dioxus` crate that is not exported from the Dioxus Native prelude then you can import it from the individual sub-crates (`dioxus-html`, `dioxus-signals`, `dioxus-router`, etc) instead.
 
-```bash
-rustup run 1.92.0 cargo run -- test-wpt formal/load-event-fires.html
-```
+The git versions of Dioxus Native still depend on the stable v0.7.x version of Dioxus from crates.io, so any additional libraries that you are using (`dioxus-sdk`, `dioxus-components`, `dioxus-free-icons`, etc) should still work.
 
-`cargo run -- test-wpt` runs the current WPT runner. The parent process mounts `tests/formal/tests/` through the `/__formal__/` alias, starts a bundled `vendor/wpt/wpt serve` instance, and reuses one `formal-web webdriver` child and WebDriver session across the run in headless mode by default. The runner launches the browser child from the release build unless `--debug-build` is passed. Pass `--headed` when you want to watch the page.
+### Modular Components
 
-The runner starts one `wpt serve` instance for the run, keeps one shared browser session for sequential test navigation, and uses `common/blank.html` between tests before loading the next test URL. If the browser session crashes, the runner recreates that session and retries the current test once while keeping the same `wpt serve` process alive. Before each run it also clears stale recorded `wpt serve` process IDs from previous interrupted runs. The runner collects `testharness.js` completion through WebDriver script execution with a rendered-summary fallback from `testharnessreport.js`.
+#### Core crates
 
-For `.any.js` files, the runner currently serves the `.any.html` variant and executes the plain window form. Worker, shared-worker, and service-worker variants are still left out of the default runner selection.
+- **`blitz-dom`** - The core DOM abstraction that includes style resolution, layout and event handling (but not parsing, rendering or system integration).
+<br /><small><b>Uses: [Stylo](https://github.com/servo/stylo) (CSS parsing/resolution), [Taffy](https://github.com/DioxusLabs/taffy) (box-level layout), [Parley](https://github.com/linebender/parley) (text layout)</b></small>
+- **`blitz-traits`** - Minimal base crate containing types and traits to allow the other crates to interoperate without depending on each other
 
-The runner writes generated `wpt serve` config and injection files under `scratchpad/wpt-runner/runtime/` and removes them after each test. When machine-readable output is needed, point `--output` at a path under `scratchpad/wpt-runner/reports/`.
+#### Additional crates
 
-Without a path it uses both `tests/wpt/include.ini` and `tests/formal/include.ini`. With `--list` it prints the selected tests without launching the embedder. Explicit paths can point at the upstream WPT tree or at the local suite through the `formal/` prefix.
+- **`blitz-net`** -  Networking that can fetch resources over http, from the file-system or from encoded data URIs.
+<br /><small><b>Uses: [reqwest](https://github.com/seanmonstar/reqwest) (HTTP client)</b></small>
+- **`blitz-paint`** - Translates a `blitz-dom` tree into `anyrender` draw commands.
+<br /><small><b>Uses: [anyrender](https://github.com/dioxuslabs/anyrender) (2D drawing abstraction)</b></small>
+- **`blitz-html`** -  Adds HTML parsing to `blitz-dom`
+<br /><small><b>Uses: [html5ever](https://github.com/servo/html5ever) (HTML parsing) and [xml5ever](https://github.com/servo/html5ever/tree/main/xml5ever) (XHTML parsing)</b></small>
+- **`blitz-shell`** - A shell that allows Blitz to render to a window (integrates a Winit event loop, AccessKit, Muda etc).
+<br /><small><b>Uses: [winit](https://github.com/rust-windowing/winit) (windowing/input), [accesskit](https://github.com/AccessKit/accesskit) (accessibility), [muda](https://github.com/tauri-apps/muda) (system menus)</b></small>
 
-```bash
-rustup run 1.92.0 cargo run -- test-wpt captured-mouse-events/captured-mouse-event-constructor.html
-```
+The AnyRender rendering abstraction now lives in it's repository over at https://github.com/dioxuslabs/anyrender
 
-The repository is still a normal Lake project. `lake build`, Lean LSP, and `lean-lsp-mcp` continue to work against the same sources, including the proof files under `FormalWeb/Proofs`.
+## License
+
+This project is dual licensed under the Apache 2.0 and MIT licenses.
+
+The `stylo_taffy` crate is ADDITIONALLY licensed under MPL 2.0 (so it is triple licensed under Apache 2.0, MIT, and MPL 2.0 licenses) for easier interop with the Servo project.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in Blitz by you, shall be dual licensed as Apache 2.0 and MIT (and MPL 2.0 if submitted to the `stylo_taffy` crate), without any additional terms or conditions.

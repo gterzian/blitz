@@ -1,1 +1,0 @@
-window.__externalScriptCount = (window.__externalScriptCount || 0) + 1;

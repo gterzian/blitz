@@ -1,3 +1,0 @@
-{
-    "tlaplus.tlc.modelChecker.options": "-workers 8 -coverage 1"
-}
