@@ -175,14 +175,17 @@ impl BaseDocument {
                     }
                 }
 
-                if *element_data.name.local == *"img"
+                let is_iframe =
+                    *element_data.name.local == *"iframe" || *element_data.name.local == *"frame";
+                let is_replaced_element = *element_data.name.local == *"img"
                     || *element_data.name.local == *"canvas"
-                    || (cfg!(feature = "svg") && *element_data.name.local == *"svg")
+                    || *element_data.name.local == *"video"
+                    || is_iframe
+                    || (cfg!(feature = "svg") && *element_data.name.local == *"svg");
+
+                if is_replaced_element
                 {
-                    // Get width and height attributes on image element
-                    //
-                    // TODO: smarter sizing using these (depending on object-fit, they shouldn't
-                    // necessarily just override the native size)
+                    // Get width and height attributes.
                     let attr_size = taffy::Size {
                         width: element_data
                             .attr(local_name!("width"))
@@ -192,26 +195,34 @@ impl BaseDocument {
                             .and_then(|val| val.parse::<f32>().ok()),
                     };
 
-                    // Get image's native sizespecial_data
-                    let inherent_size = match &element_data.special_data {
-                        SpecialElementData::Image(image_data) => match &**image_data {
-                            ImageData::Raster(image) => taffy::Size {
-                                width: image.width as f32,
-                                height: image.height as f32,
-                            },
-                            #[cfg(feature = "svg")]
-                            ImageData::Svg(svg) => {
-                                let size = svg.size();
-                                taffy::Size {
-                                    width: size.width(),
-                                    height: size.height(),
+                    // Replaced elements (iframe, video, etc.) use the default embedded-content
+                    // object size when no explicit dimensions are present.
+                    let inherent_size = if is_iframe || *element_data.name.local == *"video" {
+                        taffy::Size {
+                            width: 300.0,
+                            height: 150.0,
+                        }
+                    } else {
+                        match &element_data.special_data {
+                            SpecialElementData::Image(image_data) => match &**image_data {
+                                ImageData::Raster(image) => taffy::Size {
+                                    width: image.width as f32,
+                                    height: image.height as f32,
+                                },
+                                #[cfg(feature = "svg")]
+                                ImageData::Svg(svg) => {
+                                    let size = svg.size();
+                                    taffy::Size {
+                                        width: size.width(),
+                                        height: size.height(),
+                                    }
                                 }
-                            }
-                            ImageData::None => taffy::Size::ZERO,
-                        },
-                        SpecialElementData::Canvas(_) => taffy::Size::ZERO,
-                        SpecialElementData::None => taffy::Size::ZERO,
-                        _ => unreachable!(),
+                                ImageData::None => taffy::Size::ZERO,
+                            },
+                            SpecialElementData::Canvas(_) => taffy::Size::ZERO,
+                            SpecialElementData::None => taffy::Size::ZERO,
+                            _ => unreachable!(),
+                        }
                     };
 
                     let replaced_context = ReplacedContext {
