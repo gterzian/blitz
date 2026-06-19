@@ -14,6 +14,7 @@ pub(crate) fn is_replaced_element(tag_name: &LocalName) -> bool {
         || *tag_name == local_name!("video")
         || *tag_name == local_name!("embed")
         || *tag_name == local_name!("iframe")
+        || *tag_name == local_name!("frame")
 }
 
 /// The intrinsic dimensions of a replaced element per CSS Images 3

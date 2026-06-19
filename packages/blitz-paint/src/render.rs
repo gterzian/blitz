@@ -505,7 +505,6 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             width: (size.width as f64 - scaled_pb.left - scaled_pb.right) * self.scale,
             height: (size.height as f64 - scaled_pb.top - scaled_pb.bottom) * self.scale,
         };
-
         // Don't render things that are out of view
         let overflow = *node.scrollable_overflow();
         let transform = self.node_transform(node, parent_style_transform);
@@ -1450,6 +1449,24 @@ impl ElementCx<'_, '_> {
         }
     }
 
+    fn fill_embedded_document_background(&self, scene: &mut impl PaintScene) {
+        let content_box = self.frame.content_box();
+        let width = content_box.width();
+        let height = content_box.height();
+        let x = content_box.origin().x;
+        let y = content_box.origin().y;
+        let transform = self.transform.then_translate(Vec2 { x, y });
+
+        scene.fill(
+            Fill::NonZero,
+            transform,
+            Color::WHITE,
+            None,
+            &Rect::from_origin_size((0.0, 0.0), (width, height)),
+            AntiAliasing::Enabled,
+        );
+    }
+
     fn draw_sub_document(&self, scene: &mut impl PaintScene) {
         if let Some(sub_doc) = self.element.sub_doc_data().map(|doc| doc.inner()) {
             let scale = self.scale;
@@ -1462,6 +1479,8 @@ impl ElementCx<'_, '_> {
             let initial_x = translation.x + content_box.origin().x;
             let initial_y = translation.y + content_box.origin().y;
             // let transform = self.transform.then_translate(Vec2 { x, y });
+
+            self.fill_embedded_document_background(scene);
 
             let painter = BlitzDomPainter::new(
                 &sub_doc,
