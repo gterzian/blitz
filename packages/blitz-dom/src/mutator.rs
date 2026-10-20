@@ -5,11 +5,13 @@ use std::ops::{Deref, DerefMut};
 use crate::document::make_device;
 use crate::layout::damage::ALL_DAMAGE;
 use crate::node::{CanvasData, NodeFlags, SpecialElementData};
-use crate::resource::ResourceRequest;
+use crate::resource::{DocumentHooks, ResourceRequest};
+use crate::util::ImageType;
 use crate::{
     Attribute, BaseDocument, Document, ElementData, Node, NodeData, QualName, local_name, qual_name,
 };
 use blitz_traits::shell::Viewport;
+use slab::Slab;
 use style::Atom;
 use style::invalidation::element::restyle_hints::RestyleHint;
 use style::stylesheets::OriginSet;
@@ -256,12 +258,14 @@ impl DocumentMutator<'_> {
             .map(|attribute| attribute.value.to_string());
         element.attrs.set(name.clone(), value);
         let attribute_change_steps = self.doc.hooks.clone();
+        // Step 3: "Run the attribute change steps with `element`, `attribute`'s local name, `oldValue`, `newValue`, and `attribute`'s namespace."
         attribute_change_steps.attribute_change_steps(
             node_id,
             element,
             name.local.as_ref(),
             old_value.as_deref(),
             Some(value),
+            name.ns.as_ref(),
         );
 
         let tag = &element.name.local;
@@ -338,12 +342,14 @@ impl DocumentMutator<'_> {
             .as_ref()
             .map(|attribute| attribute.value.to_string());
         let attribute_change_steps = self.doc.hooks.clone();
+        // Step 3: "Run the attribute change steps with `element`, `attribute`'s local name, `oldValue`, `newValue`, and `attribute`'s namespace."
         attribute_change_steps.attribute_change_steps(
             node_id,
             element,
             name.local.as_ref(),
             removed_value.as_deref(),
             None,
+            name.ns.as_ref(),
         );
 
         // If element is a CustomWidget, then call attribute_changed on it
@@ -416,23 +422,24 @@ impl DocumentMutator<'_> {
 
     /// Remove the node from it's parent but don't drop it
     pub fn remove_node(&mut self, node_id: usize) {
-        let node = &mut self.doc.nodes[node_id];
-
+        let old_ancestor = self.doc.nodes[node_id].parent;
         // Update child_idx values
-        if let Some(parent_id) = node.parent.take() {
+        if let Some(parent_id) = old_ancestor {
             let parent = &mut self.doc.nodes[parent_id];
             parent.insert_damage(ALL_DAMAGE);
             // Mark ancestors dirty so the style traversal visits this subtree.
             parent.mark_ancestors_dirty();
             parent.children.retain(|id| *id != node_id);
             self.maybe_record_node(parent_id);
+            self.doc.nodes[node_id].parent = None;
         }
 
-        self.process_removed_subtree(node_id);
+        self.process_removed_subtree(node_id, old_ancestor);
     }
 
     pub fn remove_and_drop_node(&mut self, node_id: usize) -> Option<Node> {
-        self.process_removed_subtree(node_id);
+        let old_ancestor = self.doc.nodes[node_id].parent;
+        self.process_removed_subtree(node_id, old_ancestor);
 
         let node = self.doc.drop_node_ignoring_parent(node_id);
 
@@ -473,7 +480,8 @@ impl DocumentMutator<'_> {
 
         let children = mem::take(&mut parent.children);
         for child_id in children {
-            self.process_removed_subtree(child_id);
+            let old_ancestor = self.doc.nodes[child_id].parent;
+            self.process_removed_subtree(child_id, old_ancestor);
             let _ = self.doc.drop_node_ignoring_parent(child_id);
         }
         self.maybe_record_node(node_id);
@@ -554,6 +562,42 @@ impl DocumentMutator<'_> {
         }
 
         self.maybe_record_node(parent_id);
+
+        // Step 7.7.1 of the DOM insert algorithm runs the insertion steps for
+        // every shadow-including inclusive descendant of each inserted node.
+        // <https://dom.spec.whatwg.org/#concept-node-insert-ext>
+        for child_id in child_ids.iter().copied() {
+            self.run_subtree_step(child_id, |hooks, node_id, element| {
+                hooks.insertion_steps(node_id, element);
+            });
+        }
+
+        // Step 10.2 of the DOM insert algorithm runs the post-connection steps
+        // for the connected nodes after every insertion step.
+        // <https://dom.spec.whatwg.org/#concept-node-post-connection-ext>
+        for child_id in child_ids.iter().copied() {
+            if self.doc.nodes[child_id].flags.is_in_document() {
+                self.run_subtree_step(child_id, |hooks, node_id, element| {
+                    hooks.post_connection_steps(node_id, element);
+                });
+            }
+        }
+    }
+
+    fn run_subtree_step(
+        &self,
+        node_id: usize,
+        mut step: impl FnMut(&dyn DocumentHooks, usize, Option<&ElementData>),
+    ) {
+        let mut node_ids = Vec::new();
+        collect_subtree_node_ids(&self.doc.nodes, node_id, &mut node_ids);
+        for node_id in node_ids {
+            step(
+                &*self.doc.hooks,
+                node_id,
+                self.doc.nodes[node_id].element_data(),
+            );
+        }
     }
 
     // Tree mutation methods (that defer to other methods)
@@ -635,14 +679,10 @@ impl<'doc> DocumentMutator<'doc> {
     }
 
     fn process_added_subtree(&mut self, node_id: usize) {
-        let hooks = self.doc.hooks.clone();
         self.doc.iter_subtree_mut(node_id, |node_id, doc| {
             let node = &mut doc.nodes[node_id];
             node.flags.set(NodeFlags::IS_IN_DOCUMENT, true);
             node.insert_damage(ALL_DAMAGE);
-
-            // <https://dom.spec.whatwg.org/#concept-node-insert-ext>
-            hooks.insertion_steps(node_id, node.element_data());
 
             // If the node has an "id" attribute, store it in the ID map.
             if let Some(id_attr) = node.attr(local_name!("id")) {
@@ -685,26 +725,31 @@ impl<'doc> DocumentMutator<'doc> {
             }
         });
 
-        // The post-connection steps run after every inserted node has run its
-        // insertion steps, and only for connected nodes.
-        // <https://dom.spec.whatwg.org/#concept-node-post-connection-ext>
-        self.doc.iter_subtree_mut(node_id, |node_id, doc| {
-            let node = &doc.nodes[node_id];
-            hooks.post_connection_steps(node_id, node.element_data());
-        });
-
         self.flush_eager_ops();
     }
 
-    fn process_removed_subtree(&mut self, node_id: usize) {
+    fn process_removed_subtree(&mut self, node_id: usize, old_ancestor: Option<usize>) {
         let hooks = self.doc.hooks.clone();
         let subtree_root = node_id;
+        let old_ancestor_element = old_ancestor
+            .and_then(|ancestor_id| self.doc.nodes.get(ancestor_id))
+            .and_then(|ancestor| ancestor.element_data());
+        let mut node_ids = Vec::new();
+        collect_subtree_node_ids(&self.doc.nodes, node_id, &mut node_ids);
+        for removed_id in node_ids {
+            // Step 11: "Run the removing steps with `node`, true, and `parent`."
+            // Step 14.1: "Run the removing steps with `descendant`, false, and `parent`."
+            // <https://dom.spec.whatwg.org/#concept-node-remove-ext>
+            hooks.removing_steps(
+                removed_id,
+                self.doc.nodes[removed_id].element_data(),
+                removed_id == subtree_root,
+                old_ancestor_element,
+            );
+        }
         self.doc.iter_subtree_mut(node_id, |node_id, doc| {
             let node = &mut doc.nodes[node_id];
             node.flags.set(NodeFlags::IS_IN_DOCUMENT, false);
-
-            // <https://dom.spec.whatwg.org/#concept-node-remove-ext>
-            hooks.removing_steps(node_id, node.element_data(), node_id == subtree_root);
 
             // Clear hover state if this node was being hovered.
             // This prevents stale hover_node_id references.
@@ -810,12 +855,21 @@ impl<'doc> DocumentMutator<'doc> {
             return;
         }
 
-        let _ = is_in_head;
         let url = self.doc.resolve_url(href);
+        let request_id = if is_in_head {
+            // The document load event waits for a stylesheet linked from the
+            // head; the node id identifies the pending resource while the
+            // embedder loads it.
+            self.doc.pending_critical_resources.insert(node.id);
+            Some(node.id)
+        } else {
+            None
+        };
         let hooks = self.doc.hooks.clone();
         hooks.resource_request(ResourceRequest::Stylesheet {
             node_id: node.id,
             url,
+            request_id,
         });
     }
 
@@ -856,7 +910,7 @@ impl<'doc> DocumentMutator<'doc> {
         hooks.resource_request(ResourceRequest::Image {
             node_id: target_id,
             url: src,
-            image_type: crate::util::ImageType::Image,
+            image_type: ImageType::Image,
         });
     }
 
@@ -1118,5 +1172,12 @@ mod test {
             !node.element_state.contains(ElementState::ENABLED),
             "form node is enabled"
         );
+    }
+}
+
+fn collect_subtree_node_ids(nodes: &Slab<Node>, node_id: usize, node_ids: &mut Vec<usize>) {
+    node_ids.push(node_id);
+    for child_id in nodes[node_id].children.iter().copied() {
+        collect_subtree_node_ids(nodes, child_id, node_ids);
     }
 }

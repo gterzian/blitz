@@ -1,23 +1,13 @@
-//! Hooks the embedding application implements to load subresources and to
-//! observe DOM tree mutations.
+//! Subresource requests and DOM-tree mutation notifications.
 //!
-//! `blitz-dom` does not perform network access itself.  Every subresource the
-//! document needs (stylesheets, fonts, images) is reported through
-//! [`DocumentHooks::resource_request`], and the embedding application loads
-//! it and hands the result back with [`BaseDocument::handle_message`].
-//!
-//! The DOM-tree hooks mirror the extension points the DOM Standard and HTML
-//! Standard define for tree mutations, so an embedding application observes
-//! mutations where the specifications say they happen:
-//!
-//! - <https://dom.spec.whatwg.org/#concept-node-insert-ext>
-//! - <https://dom.spec.whatwg.org/#concept-node-remove-ext>
-//! - <https://dom.spec.whatwg.org/#concept-node-post-connection-ext>
-//! - <https://dom.spec.whatwg.org/#concept-element-attributes-change-ext>
+//! `blitz-dom` performs no network access.  The embedding application loads
+//! every [`ResourceRequest`] it receives and installs the result with
+//! [`BaseDocument::handle_message`].
 
 use crate::node::ElementData;
 use crate::util::ImageType;
 use blitz_traits::net::Bytes;
+use parley::fontique::FontStyle as FontiqueFontStyle;
 use std::sync::{Arc, Mutex};
 use style::{
     font_face::{
@@ -35,25 +25,28 @@ use style::{
 };
 use url::Url;
 
-/// A subresource the document needs.  The embedding application loads it and
-/// installs the result with [`BaseDocument::handle_message`].
+/// A subresource the document needs.
 #[derive(Clone, Debug)]
 pub enum ResourceRequest {
-    /// A stylesheet loaded for a `<link rel=stylesheet>` element.
-    /// <https://html.spec.whatwg.org/multipage/links.html#link-type-stylesheet>
-    Stylesheet { node_id: usize, url: Url },
-    /// A stylesheet imported with `@import`.
-    /// <https://drafts.csswg.org/css-cascade/#at-import>
+    /// A `<link rel=stylesheet>` stylesheet.
+    Stylesheet {
+        node_id: usize,
+        url: Url,
+        /// Set for a stylesheet linked from the document's head: the id the
+        /// document tracks in its pending critical resources until the
+        /// stylesheet is installed.
+        request_id: Option<usize>,
+    },
+    /// An `@import` stylesheet.
     StylesheetImport { url: Url },
-    /// An image referenced by `background-image`, `mask-image`, or a replaced
-    /// element that is not rendered as an embedded layer.
+    /// A CSS `background-image`/`mask-image`, or a replaced element image that
+    /// the document paints itself.
     Image {
         node_id: usize,
         url: Url,
         image_type: ImageType,
     },
-    /// A font referenced by an `@font-face` rule.
-    /// <https://drafts.csswg.org/css-fonts/#font-face-rule>
+    /// An `@font-face` font.
     Font {
         node_id: Option<usize>,
         url: Url,
@@ -78,15 +71,13 @@ pub struct FontFaceOverrides {
     /// upper bound in the common single-value case.
     pub weight: Option<f32>,
     /// `font-style` descriptor mapped to fontique's `FontStyle`.
-    pub style: Option<parley::fontique::FontStyle>,
+    pub style: Option<FontiqueFontStyle>,
 }
 
 /// The DOM-tree and subresource hooks of one document.
 pub trait DocumentHooks: Send + Sync + 'static {
-    /// Report a subresource the document needs.
     fn resource_request(&self, _request: ResourceRequest) {}
 
-    /// Run the attribute change steps.
     /// <https://dom.spec.whatwg.org/#concept-element-attributes-change-ext>
     fn attribute_change_steps(
         &self,
@@ -95,24 +86,23 @@ pub trait DocumentHooks: Send + Sync + 'static {
         _local_name: &str,
         _old_value: Option<&str>,
         _new_value: Option<&str>,
+        _namespace: &str,
     ) {
     }
 
-    /// Run the insertion steps.
     /// <https://dom.spec.whatwg.org/#concept-node-insert-ext>
     fn insertion_steps(&self, _node_id: usize, _element: Option<&ElementData>) {}
 
-    /// Run the post-connection steps.
     /// <https://dom.spec.whatwg.org/#concept-node-post-connection-ext>
     fn post_connection_steps(&self, _node_id: usize, _element: Option<&ElementData>) {}
 
-    /// Run the removing steps.
     /// <https://dom.spec.whatwg.org/#concept-node-remove-ext>
     fn removing_steps(
         &self,
         _node_id: usize,
         _element: Option<&ElementData>,
         _is_subtree_root: bool,
+        _old_ancestor: Option<&ElementData>,
     ) {
     }
 }
@@ -123,8 +113,6 @@ pub struct NoopDocumentHooks;
 
 impl DocumentHooks for NoopDocumentHooks {}
 
-/// The result of loading one subresource, installed by
-/// [`crate::BaseDocument::handle_message`].
 #[derive(Clone, Debug)]
 pub enum Resource {
     Image(ImageType, u32, u32, Arc<Vec<u8>>),
@@ -135,7 +123,6 @@ pub enum Resource {
     None,
 }
 
-#[allow(unused)]
 pub struct ResourceLoadResponse {
     pub request_id: usize,
     pub node_id: Option<usize>,
@@ -208,8 +195,6 @@ impl ServoStylesheetLoader for StylesheetLoader {
     }
 }
 
-/// Collect the `@font-face` sources of a stylesheet, with the descriptors
-/// needed to register the loaded font under its CSS family name.
 pub(crate) fn collect_font_face_requests(
     sheet: &Stylesheet,
     read_guard: &SharedRwLockReadGuard,
@@ -308,8 +293,6 @@ fn stylo_to_fontique_style(style: &StyloFontStyle) -> parley::fontique::FontStyl
     }
 }
 
-/// Build a stylesheet from CSS text, reporting its `@import` rules through
-/// `loader`.
 pub(crate) fn make_stylesheet(
     css: &str,
     url: &UrlExtraData,
