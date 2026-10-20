@@ -1385,6 +1385,13 @@ impl ElementCx<'_, '_> {
     }
 
     fn draw_image(&self, scene: &mut impl PaintScene) {
+        // When the embedding application renders `<img>` elements as separate
+        // composited layers, the image must not also be baked into this
+        // document's scene. Other replaced elements (e.g. `input[type=image]`)
+        // keep painting here.
+        if self.context.dom.embedded_images() && self.element.name.local == local_name!("img") {
+            return;
+        }
         if let Some(image) = self.element.raster_image_data() {
             let content_box = self.frame.content_box();
             let width = content_box.width() as u32;

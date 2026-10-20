@@ -9,8 +9,8 @@ use std::mem;
 use std::ops::{Deref, DerefMut, Range};
 
 use crate::layout::damage::ALL_DAMAGE;
-use crate::net::{ResourceHandler, StylesheetHandler};
 use crate::node::{CanvasData, NodeFlags, SpecialElementData};
+use crate::resource::ResourceRequest;
 use crate::stylo::DeviceChanges;
 use crate::util::ImageType;
 use crate::{
@@ -356,7 +356,20 @@ impl DocumentMutator<'_> {
                 .attribute_changed(&name.local, old_value, Some(value));
         }
 
+        let old_value = element
+            .attrs
+            .get(&name)
+            .map(|attribute| attribute.value.to_string());
         element.attrs.set(name.clone(), value);
+        let attribute_change_steps = self.doc.hooks.clone();
+        attribute_change_steps.attribute_change_steps(
+            node_id,
+            element,
+            name.local.as_ref(),
+            old_value.as_deref(),
+            Some(value),
+        );
+
         element.presentational_hints.take();
         if node_is_in_document {
             devtools!(
@@ -489,6 +502,18 @@ impl DocumentMutator<'_> {
         if !had_attr {
             return;
         }
+        let removed_value = removed_attr
+            .as_ref()
+            .map(|attribute| attribute.value.to_string());
+        let attribute_change_steps = self.doc.hooks.clone();
+        attribute_change_steps.attribute_change_steps(
+            node_id,
+            element,
+            name.local.as_ref(),
+            removed_value.as_deref(),
+            None,
+        );
+
         element.presentational_hints.take();
         self.mutations_occurred |= node_is_in_document;
         if node_is_in_document {
@@ -1199,10 +1224,14 @@ impl<'doc> DocumentMutator<'doc> {
     }
 
     fn process_added_subtree(&mut self, node_id: NodeId) {
+        let hooks = self.doc.hooks.clone();
         self.doc.iter_subtree_mut(node_id, |node_id, doc| {
             let node = &mut doc.nodes[node_id];
             node.flags.set(NodeFlags::IS_IN_DOCUMENT, true);
             node.insert_damage(ALL_DAMAGE);
+
+            // <https://dom.spec.whatwg.org/#concept-node-insert-ext>
+            hooks.insertion_steps(node_id, node.element_data());
 
             // If the node has an "id" attribute, store it in the ID map.
             if let Some(id_attr) = node.attr(local_name!("id")).map(ToString::to_string) {
@@ -1260,10 +1289,20 @@ impl<'doc> DocumentMutator<'doc> {
             }
         });
 
+        // The post-connection steps run after every inserted node has run its
+        // insertion steps, and only for connected nodes.
+        // <https://dom.spec.whatwg.org/#concept-node-post-connection-ext>
+        self.doc.iter_subtree_mut(node_id, |node_id, doc| {
+            let node = &doc.nodes[node_id];
+            hooks.post_connection_steps(node_id, node.element_data());
+        });
+
         self.flush_eager_ops();
     }
 
     fn process_removed_subtree(&mut self, node_id: NodeId) {
+        let hooks = self.doc.hooks.clone();
+        let subtree_root = node_id;
         self.doc.iter_subtree_mut(node_id, |node_id, doc| {
             doc.nodes[node_id]
                 .flags
@@ -1276,12 +1315,28 @@ impl<'doc> DocumentMutator<'doc> {
 
             let node = &mut doc.nodes[node_id];
 
+            // <https://dom.spec.whatwg.org/#concept-node-remove-ext>
+            hooks.removing_steps(node_id, node.element_data(), node_id == subtree_root);
+
             // Clear the text selection if one of its endpoints references this node.
             // This prevents stale selection endpoint references.
             if doc.text_selection.anchor.node_or_parent == Some(node_id)
                 || doc.text_selection.focus.node_or_parent == Some(node_id)
             {
                 doc.text_selection.clear();
+            }
+
+            // Clear hover state if this node was being hovered.
+            // This prevents stale hover_node_id references.
+            if doc.hover_node_id == Some(node_id) {
+                doc.hover_node_id = None;
+                doc.hover_node_is_text = false;
+            }
+
+            // Clear active state if this node was active
+            // This prevents stale active_node_id references.
+            if doc.active_node_id == Some(node_id) {
+                doc.active_node_id = None;
             }
 
             // Remove any snapshot for this node to prevent stale snapshot references
@@ -1356,16 +1411,6 @@ impl<'doc> DocumentMutator<'doc> {
     fn load_linked_stylesheet(&mut self, target_id: NodeId) {
         let node = &self.doc.nodes[target_id];
 
-        let mut is_in_head = false;
-        let mut parent_id = node.parent;
-        while let Some(id) = parent_id
-            && !is_in_head
-        {
-            let parent = &self.doc.nodes[id];
-            is_in_head |= parent.data.is_element_with_tag_name(&local_name!("head"));
-            parent_id = parent.parent;
-        }
-
         let rel_attr = node.attr(local_name!("rel"));
         let href_attr = node.attr(local_name!("href"));
 
@@ -1379,33 +1424,14 @@ impl<'doc> DocumentMutator<'doc> {
             return;
         }
 
-        let Some(url) = self.doc.url.resolve_relative(href) else {
+        let Some(url) = self.doc.resolve_url(href) else {
             return;
         };
-        let handler = ResourceHandler::new(
-            self.doc.tx.clone(),
-            self.doc.id(),
-            Some(node.id),
-            self.doc.shell_provider.clone(),
-            StylesheetHandler {
-                source_url: url.clone(),
-                guard: self.doc.guard.clone(),
-                net_provider: self.doc.net_provider.clone(),
-                abort_signal: self.doc.abort_signal.clone(),
-            },
-        );
-
-        if is_in_head && !self.doc.net_provider.is_noop() {
-            self.doc
-                .pending_critical_resources
-                .insert(handler.request_id());
-        }
-
-        self.doc.net_provider.fetch(
-            self.doc.id(),
-            self.doc.build_request(url),
-            Box::new(handler),
-        );
+        let hooks = self.doc.hooks.clone();
+        hooks.resource_request(ResourceRequest::Stylesheet {
+            node_id: node.id,
+            url,
+        });
     }
 
     fn unload_stylesheet(&mut self, node_id: NodeId) {
@@ -1436,6 +1462,12 @@ impl<'doc> DocumentMutator<'doc> {
     /// Load the image of an `<img>`, or the href of an SVG `<image>` or `<feImage>`,
     /// which usvg reads from the image cache when parsing the `<svg>`.
     fn load_image(&mut self, target_id: NodeId) {
+        // `<img>` elements whose pixels the embedding application decodes and
+        // composites itself are driven by the HTML "update the image data"
+        // algorithm, not by the document's layout-time image loader.
+        if self.doc.embedded_images() {
+            return;
+        }
         let Some(element) = self.doc.nodes[target_id].element_data() else {
             return;
         };

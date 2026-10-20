@@ -353,15 +353,7 @@ impl<Rend: WindowRenderer> View<Rend> {
         );
 
         self.renderer.render(|scene| {
-            paint_scene(
-                scene,
-                &mut inner,
-                scale,
-                width,
-                height,
-                insets.left,
-                insets.top,
-            )
+            paint_scene(scene, &inner, scale, width, height, insets.left, insets.top)
         });
 
         self.waker = Some(create_waker(&self.proxy, window_id));
@@ -435,15 +427,7 @@ impl<Rend: WindowRenderer> View<Rend> {
 
         if !is_blocked && is_visible {
             self.renderer.render(|scene| {
-                paint_scene(
-                    scene,
-                    &mut inner,
-                    scale,
-                    width,
-                    height,
-                    insets.left,
-                    insets.top,
-                )
+                paint_scene(scene, &inner, scale, width, height, insets.left, insets.top)
             });
         }
 

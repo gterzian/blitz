@@ -33,7 +33,7 @@ use cssparser::ToCss as _;
 use blitz_traits::node_id::NodeId;
 
 use crate::BaseDocument;
-use crate::net::StylesheetLoader;
+use crate::resource::{ResourceRequest, StylesheetLoader, collect_font_face_requests_in_rules};
 
 /// Errors from CSSOM mutation operations, mirroring the `DOMException` names
 /// which the corresponding JavaScript APIs throw.
@@ -331,11 +331,8 @@ impl BaseDocument {
 
     fn stylesheet_loader(&self) -> StylesheetLoader {
         StylesheetLoader {
-            tx: self.tx.clone(),
-            doc_id: self.id(),
-            net_provider: self.net_provider.clone(),
-            shell_provider: self.shell_provider.clone(),
-            abort_signal: self.abort_signal.clone(),
+            pending_imports: self.pending_stylesheet_imports.clone(),
+            hooks: self.hooks.clone(),
             import_depth: 0,
         }
     }
@@ -513,16 +510,15 @@ impl BaseDocument {
 
         let guard = lock.read();
         if let CssRule::FontFace(_) = &new_rule {
-            crate::net::fetch_font_face_rules(
-                std::iter::once(&new_rule),
-                self.tx.clone(),
-                self.id(),
-                Some(node_id),
-                &self.net_provider,
-                &self.shell_provider,
-                &guard,
-                self.abort_signal.as_ref(),
-            );
+            for (url, overrides) in
+                collect_font_face_requests_in_rules(std::iter::once(&new_rule), &guard)
+            {
+                self.hooks.resource_request(ResourceRequest::Font {
+                    node_id: Some(node_id),
+                    url,
+                    overrides,
+                });
+            }
         }
         let (change_kind, ancestors) = match &list {
             RuleList::Css(_) => (RuleChangeKind::Insertion, ancestors.as_slice()),

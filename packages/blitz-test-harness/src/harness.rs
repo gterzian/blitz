@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use blitz_dom::{DocGuard, DocGuardMut, Document, DocumentConfig};
+use blitz_dom::{DocGuard, DocGuardMut, Document, DocumentConfig, DocumentHooks};
 use blitz_html::{HtmlDocument, HtmlProvider};
 use blitz_traits::events::UiEvent;
-use blitz_traits::net::NetProvider;
 use blitz_traits::shell::{ColorScheme, Viewport};
 use dioxus_core::{Element, VirtualDom};
 use dioxus_native_dom::DioxusDocument;
@@ -16,8 +15,8 @@ pub struct HarnessOptions {
     pub color_scheme: ColorScheme,
     /// Base url which relative URLs are resolved against
     pub base_url: Option<String>,
-    /// Net provider used to fetch sub-resources (stylesheets, images, fonts, etc)
-    pub net_provider: Option<Arc<dyn NetProvider>>,
+    /// Hooks used to load sub-resources (stylesheets, images, fonts, etc)
+    pub hooks: Option<Arc<dyn DocumentHooks>>,
 }
 
 impl Default for HarnessOptions {
@@ -28,7 +27,7 @@ impl Default for HarnessOptions {
             scale: 1.0,
             color_scheme: ColorScheme::Light,
             base_url: None,
-            net_provider: None,
+            hooks: None,
         }
     }
 }
@@ -43,7 +42,7 @@ impl HarnessOptions {
                 self.color_scheme,
             )),
             base_url: self.base_url,
-            net_provider: self.net_provider,
+            hooks: self.hooks,
             html_parser_provider: Some(Arc::new(HtmlProvider) as _),
             ..Default::default()
         }

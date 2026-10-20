@@ -1,9 +1,9 @@
+use crate::resource::DocumentHooks;
 use crate::{HtmlParserProvider, UserAgentStylesheet};
 #[cfg(feature = "devtools")]
 use blitz_traits::devtools::DevtoolsProvider;
 use blitz_traits::{
     navigation::NavigationProvider,
-    net::{AbortSignal, NetProvider},
     shell::{ShellProvider, Viewport},
 };
 use parley::FontContext;
@@ -39,8 +39,9 @@ pub struct DocumentConfig {
     /// The list is used as given, so replacing it removes the default sheet unless it is
     /// included, e.g. `vec![UserAgentStylesheet::default_sheet(), custom]`.
     pub ua_stylesheets: Vec<UserAgentStylesheet>,
-    /// Net provider to handle network requests for resources
-    pub net_provider: Option<Arc<dyn NetProvider>>,
+    /// Hooks that receive the document's subresource requests and DOM tree
+    /// mutation notifications.
+    pub hooks: Option<Arc<dyn DocumentHooks>>,
     /// Navigation provider to handle link clicks and form submissions
     pub navigation_provider: Option<Arc<dyn NavigationProvider>>,
     /// Shell provider to redraw requests, clipboard, etc
@@ -61,10 +62,11 @@ pub struct DocumentConfig {
     /// whole tree is reconstructed and laid out from scratch through the same
     /// damage-driven pipeline used by incremental mode.
     pub incremental: Option<bool>,
-    /// If set, every sub-resource `Request` blitz-dom creates for this
-    /// document will carry this signal. Aborting it cancels every in-flight
-    /// fetch tied to this document.
-    pub abort_signal: Option<AbortSignal>,
+    /// When true, `<img>` elements are painted as separate embedded layers by
+    /// the embedding application rather than baked into the document's scene.
+    /// Sub-documents (same-origin iframes) keep this false so their images
+    /// stay in the parent's scene.
+    pub embedded_images: bool,
     /// How deeply this document is nested within other documents
     /// (0 for a root document). Used to limit `<iframe>` nesting depth.
     pub subdocument_depth: usize,
@@ -79,7 +81,7 @@ impl Default for DocumentConfig {
             viewport: None,
             base_url: None,
             ua_stylesheets: vec![UserAgentStylesheet::default_sheet()],
-            net_provider: None,
+            hooks: None,
             navigation_provider: None,
             shell_provider: None,
             html_parser_provider: None,
@@ -87,7 +89,7 @@ impl Default for DocumentConfig {
             media_type: None,
             style_threading: StyleThreading::default(),
             incremental: None,
-            abort_signal: None,
+            embedded_images: false,
             subdocument_depth: 0,
             #[cfg(feature = "devtools")]
             devtools_provider: None,

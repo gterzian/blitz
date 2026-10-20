@@ -77,7 +77,7 @@ pub use resolved_style::{
 pub use stylo_taffy::CopyStyleGetters;
 pub use stylo_to_kurbo::resolve_2d_transform;
 
-pub mod net;
+pub mod resource;
 pub mod util;
 
 #[cfg(feature = "accessibility")]
@@ -93,14 +93,17 @@ pub use blitz_traits::node_id::NodeId;
 // Re-export taffy: it is part of blitz-dom's public API (e.g. `Node::style`,
 // `Node::final_layout`)
 pub use config::{DocumentConfig, StyleThreading};
-pub use document::{BaseDocument, BoundingRect, DocGuard, DocGuardMut, Document, PlainDocument};
+pub use document::{
+    BaseDocument, BoundingRect, DocGuard, DocGuardMut, Document, DocumentEvent, PlainDocument,
+};
 pub use markup5ever::{
     LocalName, Namespace, NamespaceStaticSet, Prefix, PrefixStaticSet, QualName, local_name,
     namespace_prefix, namespace_url, ns,
 };
 pub use mutator::DocumentMutator;
-pub use node::{Attribute, DocumentData, ElementData, Node, NodeData, TextNodeData};
+pub use node::{Attribute, DocumentData, ElementData, Node, NodeData, Status, TextNodeData};
 pub use parley::FontContext;
+pub use resource::{DocumentHooks, FontFaceOverrides, NoopDocumentHooks, ResourceRequest};
 pub use scrolling::{ScrollBehavior, ScrollLogicalPosition};
 pub use stylo::UserAgentStylesheet;
 pub use tree::NodeTree;
