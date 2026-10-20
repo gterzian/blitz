@@ -183,8 +183,7 @@ impl BaseDocument {
                     || is_iframe
                     || (cfg!(feature = "svg") && *element_data.name.local == *"svg");
 
-                if is_replaced_element
-                {
+                if is_replaced_element {
                     // Get width and height attributes.
                     let attr_size = taffy::Size {
                         width: element_data

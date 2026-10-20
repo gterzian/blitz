@@ -3,10 +3,11 @@ use crate::font_metrics::BlitzFontMetricsProvider;
 use crate::layout::construct::ConstructionTask;
 use crate::layout::damage::ALL_DAMAGE;
 use crate::mutator::ViewportMut;
-use crate::net::{
-    Resource, ResourceHandler, ResourceLoadResponse, StylesheetHandler, StylesheetLoader,
-};
 use crate::node::{ImageData, NodeFlags, RasterImageData, SpecialElementData, Status, TextBrush};
+use crate::resource::{
+    DocumentHooks, NoopDocumentHooks, PendingStylesheetImport, Resource, ResourceLoadResponse,
+    ResourceRequest, StylesheetLoader, collect_font_face_requests, make_stylesheet,
+};
 use crate::selection::TextSelection;
 use crate::stylo_to_cursor_icon::stylo_to_cursor_icon;
 use crate::traversal::TreeTraverser;
@@ -20,7 +21,6 @@ use crate::{
 use blitz_traits::devtools::DevtoolSettings;
 use blitz_traits::events::{BlitzScrollEvent, DomEvent, DomEventData, HitResult, UiEvent};
 use blitz_traits::navigation::{DummyNavigationProvider, NavigationProvider};
-use blitz_traits::net::{AbortSignal, DummyNetProvider, NetProvider, Request};
 use blitz_traits::shell::{ColorScheme, DummyShellProvider, ShellProvider, Viewport};
 use cursor_icon::CursorIcon;
 use linebender_resource_handle::Blob;
@@ -35,7 +35,6 @@ use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLockReadGuard, RwLockWriteGuard};
 use std::task::Context as TaskContext;
 use style::Atom;
@@ -56,7 +55,10 @@ use style::{
     media_queries::MediaList,
     selector_parser::SnapshotMap,
     shared_lock::{SharedRwLock, StylesheetGuards},
-    stylesheets::{AllowImportRules, DocumentStyleSheet, Origin, Stylesheet},
+    stylesheets::{
+        AllowImportRules, DocumentStyleSheet, Origin, Stylesheet, UrlExtraData,
+        import_rule::ImportSheet,
+    },
     stylist::Stylist,
 };
 use url::Url;
@@ -193,12 +195,11 @@ pub struct BaseDocument {
     pub(crate) media_type: MediaType,
     /// Strategy for Stylo's style traversal during `resolve`.
     pub(crate) style_threading: StyleThreading,
+    /// When true, `<img>` elements are painted as separate embedded layers by
+    /// the embedding application rather than baked into this document's scene.
+    embedded_images: bool,
 
     // Events
-    pub(crate) tx: Sender<DocumentEvent>,
-    // rx will always be Some, except temporarily while processing events
-    pub(crate) rx: Option<Receiver<DocumentEvent>>,
-
     /// A slab-backed tree of nodes
     ///
     /// We pin the tree to a guarantee to the nodes it creates that the tree is stable in memory.
@@ -291,8 +292,9 @@ pub struct BaseDocument {
     pub(crate) pending_critical_resources: HashSet<usize>,
 
     // Service providers
-    /// Network provider. Can be used to fetch assets.
-    pub net_provider: Arc<dyn NetProvider>,
+    /// Hooks that receive the document's subresource requests and DOM tree
+    /// mutation notifications.
+    pub hooks: Arc<dyn DocumentHooks>,
     /// Navigation provider. Can be used to navigate to a new page (bubbles up the event
     /// on e.g. clicking a Link)
     pub navigation_provider: Arc<dyn NavigationProvider>,
@@ -300,10 +302,8 @@ pub struct BaseDocument {
     pub shell_provider: Arc<dyn ShellProvider>,
     /// HTML parser provider. Used to parse HTML for setInnerHTML
     pub html_parser_provider: Arc<dyn HtmlParserProvider>,
-    /// Carried on every sub-resource `Request` this document issues; aborting
-    /// it cancels all in-flight fetches tied to this document. Set via
-    /// [`DocumentConfig::abort_signal`].
-    pub(crate) abort_signal: Option<AbortSignal>,
+    /// `@import` rules waiting for their stylesheet.
+    pub(crate) pending_stylesheet_imports: Arc<Mutex<Vec<PendingStylesheetImport>>>,
 }
 
 pub(crate) fn make_device(
@@ -384,9 +384,7 @@ impl BaseDocument {
             .and_then(|url| DocumentUrl::from_str(&url).ok())
             .unwrap_or_default();
 
-        let net_provider = config
-            .net_provider
-            .unwrap_or_else(|| Arc::new(DummyNetProvider));
+        let hooks = config.hooks.unwrap_or_else(|| Arc::new(NoopDocumentHooks));
         let navigation_provider = config
             .navigation_provider
             .unwrap_or_else(|| Arc::new(DummyNavigationProvider));
@@ -397,12 +395,8 @@ impl BaseDocument {
             .html_parser_provider
             .unwrap_or_else(|| Arc::new(DummyHtmlParserProvider));
 
-        let (tx, rx) = channel();
-
         let mut doc = Self {
             id,
-            tx,
-            rx: Some(rx),
 
             guard,
             nodes,
@@ -413,6 +407,7 @@ impl BaseDocument {
             viewport,
             media_type,
             style_threading: config.style_threading,
+            embedded_images: config.embedded_images,
             devtool_settings: DevtoolSettings::default(),
             viewport_scroll: crate::Point::ZERO,
             url: base_url,
@@ -444,11 +439,11 @@ impl BaseDocument {
             pending_images: HashMap::new(),
             pending_critical_resources: HashSet::new(),
             controls_to_form: HashMap::new(),
-            net_provider,
+            hooks,
             navigation_provider,
             shell_provider,
             html_parser_provider,
-            abort_signal: config.abort_signal,
+            pending_stylesheet_imports: Arc::new(Mutex::new(Vec::new())),
             last_mousedown_time: None,
             mousedown_position: taffy::Point::ZERO,
             click_count: 0,
@@ -487,11 +482,6 @@ impl BaseDocument {
         doc
     }
 
-    /// Set the Document's networking provider
-    pub fn set_net_provider(&mut self, net_provider: Arc<dyn NetProvider>) {
-        self.net_provider = net_provider;
-    }
-
     /// Set the Document's navigation provider
     pub fn set_navigation_provider(&mut self, navigation_provider: Arc<dyn NavigationProvider>) {
         self.navigation_provider = navigation_provider;
@@ -524,10 +514,10 @@ impl BaseDocument {
         self.id
     }
 
-    /// Wrapper around [`crate::net::stamped_request`]. Use the free function
-    /// when `&self` would conflict with a held `&mut` borrow on a field.
-    pub(crate) fn build_request(&self, url: url::Url) -> Request {
-        crate::net::stamped_request(url, self.abort_signal.as_ref())
+    /// Whether `<img>` elements are painted as separate embedded layers by the
+    /// embedding application rather than baked into this document's scene.
+    pub fn embedded_images(&self) -> bool {
+        self.embedded_images
     }
 
     pub fn favicon_url(&self) -> Option<String> {
@@ -713,7 +703,7 @@ impl BaseDocument {
             .extend_from_slice(&resources_to_deallocate);
         self.custom_widget_nodes.remove(&node_id);
     }
-    
+
     pub fn root_node(&self) -> &Node {
         &self.nodes[0]
     }
@@ -837,6 +827,7 @@ impl BaseDocument {
     }
 
     pub fn reload_resource_by_href(&mut self, href_to_reload: &str) {
+        let mut requests = Vec::new();
         for &node_id in self.nodes_to_stylesheet.keys() {
             let node = &self.nodes[node_id];
             let Some(element) = node.element_data() else {
@@ -845,28 +836,15 @@ impl BaseDocument {
 
             if element.name.local == local_name!("link") {
                 if let Some(href) = element.attr(local_name!("href")) {
-                    // println!("Node {node_id} {href} {href_to_reload} {} {}", resolved_href.as_str(), resolved_href.as_str() == url_to_reload);
                     if href == href_to_reload {
-                        let resolved_href = self.resolve_url(href);
-                        self.net_provider.fetch(
-                            self.id(),
-                            self.build_request(resolved_href.clone()),
-                            ResourceHandler::boxed(
-                                self.tx.clone(),
-                                self.id,
-                                Some(node_id),
-                                self.shell_provider.clone(),
-                                StylesheetHandler {
-                                    source_url: resolved_href,
-                                    guard: self.guard.clone(),
-                                    net_provider: self.net_provider.clone(),
-                                    abort_signal: self.abort_signal.clone(),
-                                },
-                            ),
-                        );
+                        requests.push((node_id, self.resolve_url(href)));
                     }
                 }
             }
+        }
+        for (node_id, url) in requests {
+            self.hooks
+                .resource_request(ResourceRequest::Stylesheet { node_id, url });
         }
     }
 
@@ -890,25 +868,57 @@ impl BaseDocument {
     }
 
     pub fn make_stylesheet(&self, css: impl AsRef<str>, origin: Origin) -> DocumentStyleSheet {
-        let data = Stylesheet::from_str(
+        let loader = StylesheetLoader {
+            pending_imports: self.pending_stylesheet_imports.clone(),
+            hooks: self.hooks.clone(),
+        };
+        make_stylesheet(
             css.as_ref(),
-            self.url.url_extra_data(),
+            &self.url.url_extra_data(),
             origin,
             ServoArc::new(self.guard.wrap(MediaList::empty())),
-            self.guard.clone(),
-            Some(&StylesheetLoader {
-                tx: self.tx.clone(),
-                doc_id: self.id,
-                net_provider: self.net_provider.clone(),
-                shell_provider: self.shell_provider.clone(),
-                abort_signal: self.abort_signal.clone(),
-            }),
+            &self.guard,
+            &loader,
+        )
+    }
+
+    /// Install the stylesheet content for one pending `@import` rule.
+    /// <https://drafts.csswg.org/css-cascade/#at-import>
+    pub fn complete_stylesheet_import(&mut self, url: &str, css: &str) {
+        let mut pending_imports = self.pending_stylesheet_imports.lock().unwrap();
+        let Some(position) = pending_imports
+            .iter()
+            .position(|import| import.url.as_str() == url)
+        else {
+            return;
+        };
+        let import = pending_imports.remove(position);
+        let sheet = ServoArc::new(Stylesheet::from_str(
+            css,
+            UrlExtraData(import.url.clone()),
+            Origin::Author,
+            import.media,
+            import.lock.clone(),
+            Some(&import.loader),
             None,
             QuirksMode::NoQuirks,
             AllowImportRules::Yes,
-        );
+        ));
 
-        DocumentStyleSheet(ServoArc::new(data))
+        for (font_url, overrides) in collect_font_face_requests(&sheet, &import.lock.read()) {
+            self.hooks.resource_request(ResourceRequest::Font {
+                node_id: None,
+                url: font_url,
+                overrides,
+            });
+        }
+
+        let mut guard = import.lock.write();
+        import.import_rule.write_with(&mut guard).stylesheet = ImportSheet::Sheet(sheet);
+        drop(guard);
+        drop(pending_imports);
+
+        self.shell_provider.request_redraw();
     }
 
     pub fn upsert_stylesheet_for_node(&mut self, node_id: usize) {
@@ -924,17 +934,13 @@ impl BaseDocument {
             self.stylist.remove_stylesheet(old, &self.guard.read())
         }
 
-        // Fetch @font-face fonts
-        crate::net::fetch_font_face(
-            self.tx.clone(),
-            self.id,
-            Some(node_id),
-            &stylesheet.0,
-            &self.net_provider,
-            &self.shell_provider,
-            &self.guard.read(),
-            self.abort_signal.as_ref(),
-        );
+        for (url, overrides) in collect_font_face_requests(&stylesheet.0, &self.guard.read()) {
+            self.hooks.resource_request(ResourceRequest::Font {
+                node_id: Some(node_id),
+                url,
+                overrides,
+            });
+        }
 
         // Store data on element
         let element = &mut self.nodes[node_id].element_data_mut().unwrap();
@@ -959,19 +965,6 @@ impl BaseDocument {
         }
     }
 
-    pub fn handle_messages(&mut self) {
-        // Remove event Reciever from the Document so that we can process events
-        // without holding a borrow to the Document
-        let rx = self.rx.take().unwrap();
-
-        while let Ok(msg) = rx.try_recv() {
-            self.handle_message(msg);
-        }
-
-        // Put Reciever back
-        self.rx = Some(rx);
-    }
-
     pub fn handle_message(&mut self, msg: DocumentEvent) {
         match msg {
             DocumentEvent::ResourceLoad(resource) => self.load_resource(resource),
@@ -991,6 +984,22 @@ impl BaseDocument {
             Err(err) => {
                 if let Some(url) = res.resolved_url.as_ref() {
                     let waiting_nodes = self.pending_images.remove(url).unwrap_or_default();
+                    // Mark waiting `<img>` elements broken so the embedder can
+                    // fire their `error` event; the image stays unavailable.
+                    for (node_id, image_type) in &waiting_nodes {
+                        if !matches!(image_type, ImageType::Image) {
+                            continue;
+                        }
+                        let Some(node) = self.get_node_mut(*node_id) else {
+                            continue;
+                        };
+                        if let Some(element_data) = node.element_data_mut() {
+                            element_data.special_data =
+                                SpecialElementData::Image(Box::new(ImageData::None));
+                        }
+                        node.cache.clear();
+                        node.insert_damage(ALL_DAMAGE);
+                    }
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
                         url = url.as_str(),
@@ -1079,6 +1088,26 @@ impl BaseDocument {
                 // Do nothing
             }
         }
+    }
+
+    /// Set the intrinsic size of an `<img>` element whose pixels the
+    /// embedding application decodes and paints itself.  Pass a zero-length
+    /// pixel buffer: the element contributes no paint source to the
+    /// document scene and only its intrinsic size is used for layout.
+    /// <https://html.spec.whatwg.org/multipage/images.html#image-request>
+    pub fn set_image_intrinsic_size(&mut self, node_id: usize, width: u32, height: u32) {
+        let Some(node) = self.get_node_mut(node_id) else {
+            return;
+        };
+        let Some(element) = node.element_data_mut() else {
+            return;
+        };
+        element.special_data = SpecialElementData::Image(Box::new(ImageData::Raster(
+            RasterImageData::new(width, height, Arc::new(Vec::new())),
+        )));
+        node.cache.clear();
+        node.insert_damage(ALL_DAMAGE);
+        self.invalidate_inline_contexts();
     }
 
     /// Cache a loaded image and apply it to all nodes waiting on it
@@ -1992,7 +2021,7 @@ impl AsMut<BaseDocument> for BaseDocument {
 #[cfg(test)]
 mod font_face_override_tests {
     use super::*;
-    use crate::net::{FontFaceOverrides, Resource, ResourceLoadResponse};
+    use crate::resource::{FontFaceOverrides, Resource, ResourceLoadResponse};
 
     /// Regression-pin for the `@font-face` descriptor-honouring fix.
     ///

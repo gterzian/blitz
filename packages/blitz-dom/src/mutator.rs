@@ -4,9 +4,8 @@ use std::ops::{Deref, DerefMut};
 
 use crate::document::make_device;
 use crate::layout::damage::ALL_DAMAGE;
-use crate::net::{ImageHandler, ResourceHandler, StylesheetHandler};
 use crate::node::{CanvasData, NodeFlags, SpecialElementData};
-use crate::util::ImageType;
+use crate::resource::ResourceRequest;
 use crate::{
     Attribute, BaseDocument, Document, ElementData, Node, NodeData, QualName, local_name, qual_name,
 };
@@ -251,7 +250,19 @@ impl DocumentMutator<'_> {
                 .attribute_changed(&name.local, old_value, Some(value));
         }
 
+        let old_value = element
+            .attrs
+            .get(&name)
+            .map(|attribute| attribute.value.to_string());
         element.attrs.set(name.clone(), value);
+        let attribute_change_steps = self.doc.hooks.clone();
+        attribute_change_steps.attribute_change_steps(
+            node_id,
+            element,
+            name.local.as_ref(),
+            old_value.as_deref(),
+            Some(value),
+        );
 
         let tag = &element.name.local;
         let attr = &name.local;
@@ -323,6 +334,17 @@ impl DocumentMutator<'_> {
         if !had_attr {
             return;
         }
+        let removed_value = removed_attr
+            .as_ref()
+            .map(|attribute| attribute.value.to_string());
+        let attribute_change_steps = self.doc.hooks.clone();
+        attribute_change_steps.attribute_change_steps(
+            node_id,
+            element,
+            name.local.as_ref(),
+            removed_value.as_deref(),
+            None,
+        );
 
         // If element is a CustomWidget, then call attribute_changed on it
         #[cfg(feature = "custom-widget")]
@@ -391,7 +413,7 @@ impl DocumentMutator<'_> {
     pub fn remove_custom_widget(&mut self, node_id: usize) {
         self.doc.remove_custom_widget(node_id)
     }
-    
+
     /// Remove the node from it's parent but don't drop it
     pub fn remove_node(&mut self, node_id: usize) {
         let node = &mut self.doc.nodes[node_id];
@@ -613,10 +635,14 @@ impl<'doc> DocumentMutator<'doc> {
     }
 
     fn process_added_subtree(&mut self, node_id: usize) {
+        let hooks = self.doc.hooks.clone();
         self.doc.iter_subtree_mut(node_id, |node_id, doc| {
             let node = &mut doc.nodes[node_id];
             node.flags.set(NodeFlags::IS_IN_DOCUMENT, true);
             node.insert_damage(ALL_DAMAGE);
+
+            // <https://dom.spec.whatwg.org/#concept-node-insert-ext>
+            hooks.insertion_steps(node_id, node.element_data());
 
             // If the node has an "id" attribute, store it in the ID map.
             if let Some(id_attr) = node.attr(local_name!("id")) {
@@ -659,13 +685,26 @@ impl<'doc> DocumentMutator<'doc> {
             }
         });
 
+        // The post-connection steps run after every inserted node has run its
+        // insertion steps, and only for connected nodes.
+        // <https://dom.spec.whatwg.org/#concept-node-post-connection-ext>
+        self.doc.iter_subtree_mut(node_id, |node_id, doc| {
+            let node = &doc.nodes[node_id];
+            hooks.post_connection_steps(node_id, node.element_data());
+        });
+
         self.flush_eager_ops();
     }
 
     fn process_removed_subtree(&mut self, node_id: usize) {
+        let hooks = self.doc.hooks.clone();
+        let subtree_root = node_id;
         self.doc.iter_subtree_mut(node_id, |node_id, doc| {
             let node = &mut doc.nodes[node_id];
             node.flags.set(NodeFlags::IS_IN_DOCUMENT, false);
+
+            // <https://dom.spec.whatwg.org/#concept-node-remove-ext>
+            hooks.removing_steps(node_id, node.element_data(), node_id == subtree_root);
 
             // Clear hover state if this node was being hovered.
             // This prevents stale hover_node_id references.
@@ -771,31 +810,13 @@ impl<'doc> DocumentMutator<'doc> {
             return;
         }
 
+        let _ = is_in_head;
         let url = self.doc.resolve_url(href);
-        let handler = ResourceHandler::new(
-            self.doc.tx.clone(),
-            self.doc.id(),
-            Some(node.id),
-            self.doc.shell_provider.clone(),
-            StylesheetHandler {
-                source_url: url.clone(),
-                guard: self.doc.guard.clone(),
-                net_provider: self.doc.net_provider.clone(),
-                abort_signal: self.doc.abort_signal.clone(),
-            },
-        );
-
-        if is_in_head {
-            self.doc
-                .pending_critical_resources
-                .insert(handler.request_id());
-        }
-
-        self.doc.net_provider.fetch(
-            self.doc.id(),
-            self.doc.build_request(url),
-            Box::new(handler),
-        );
+        let hooks = self.doc.hooks.clone();
+        hooks.resource_request(ResourceRequest::Stylesheet {
+            node_id: node.id,
+            url,
+        });
     }
 
     fn unload_stylesheet(&mut self, node_id: usize) {
@@ -817,52 +838,26 @@ impl<'doc> DocumentMutator<'doc> {
     }
 
     fn load_image(&mut self, target_id: usize) {
-        let node = &self.doc.nodes[target_id];
-        if let Some(raw_src) = node.attr(local_name!("src")) {
-            if !raw_src.is_empty() {
-                let src = self.doc.resolve_url(raw_src);
-                let src_string = src.as_str();
-
-                // Check cache first
-                if let Some(cached_image) = self.doc.image_cache.get(src_string) {
-                    #[cfg(feature = "tracing")]
-                    tracing::info!("Loading image {src_string} from cache");
-                    let node = &mut self.doc.nodes[target_id];
-                    node.element_data_mut().unwrap().special_data =
-                        SpecialElementData::Image(Box::new(cached_image.clone()));
-                    node.cache.clear();
-                    node.insert_damage(ALL_DAMAGE);
-                    return;
-                }
-
-                // Check if there's already a pending request for this URL
-                if let Some(waiting_list) = self.doc.pending_images.get_mut(src_string) {
-                    #[cfg(feature = "tracing")]
-                    tracing::info!("Image {src_string} already pending, queueing node {target_id}");
-                    waiting_list.push((target_id, ImageType::Image));
-                    return;
-                }
-
-                // Start fetch and track as pending
-                #[cfg(feature = "tracing")]
-                tracing::info!("Fetching image {src_string}");
-                self.doc
-                    .pending_images
-                    .insert(src_string.to_string(), vec![(target_id, ImageType::Image)]);
-
-                self.doc.net_provider.fetch(
-                    self.doc.id(),
-                    self.doc.build_request(src),
-                    ResourceHandler::boxed(
-                        self.doc.tx.clone(),
-                        self.doc.id(),
-                        None, // Don't pass node_id, we'll handle it via pending_images
-                        self.doc.shell_provider.clone(),
-                        ImageHandler::new(ImageType::Image),
-                    ),
-                );
-            }
+        // `<img>` elements whose pixels the embedding application decodes and
+        // composites itself are driven by the HTML "update the image data"
+        // algorithm, not by the document's layout-time image loader.
+        if self.doc.embedded_images() {
+            return;
         }
+        let node = &self.doc.nodes[target_id];
+        let Some(raw_src) = node.attr(local_name!("src")) else {
+            return;
+        };
+        if raw_src.is_empty() {
+            return;
+        }
+        let src = self.doc.resolve_url(raw_src);
+        let hooks = self.doc.hooks.clone();
+        hooks.resource_request(ResourceRequest::Image {
+            node_id: target_id,
+            url: src,
+            image_type: crate::util::ImageType::Image,
+        });
     }
 
     fn load_custom_paint_src(&mut self, target_id: usize) {
