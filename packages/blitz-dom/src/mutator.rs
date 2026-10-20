@@ -10,11 +10,12 @@ use std::ops::{Deref, DerefMut, Range};
 
 use crate::layout::damage::ALL_DAMAGE;
 use crate::node::{CanvasData, NodeFlags, SpecialElementData};
-use crate::resource::ResourceRequest;
+use crate::resource::{DocumentHooks, ResourceRequest};
 use crate::stylo::DeviceChanges;
 use crate::util::ImageType;
 use crate::{
-    Attribute, BaseDocument, Document, ElementData, Node, NodeData, QualName, local_name, qual_name,
+    Attribute, BaseDocument, Document, ElementData, Node, NodeData, NodeTree, QualName, local_name,
+    qual_name,
 };
 use blitz_traits::shell::Viewport;
 use selectors::matching::ElementSelectorFlags;
@@ -362,12 +363,14 @@ impl DocumentMutator<'_> {
             .map(|attribute| attribute.value.to_string());
         element.attrs.set(name.clone(), value);
         let attribute_change_steps = self.doc.hooks.clone();
+        // Step 3: "Run the attribute change steps with `element`, `attribute`'s local name, `oldValue`, `newValue`, and `attribute`'s namespace."
         attribute_change_steps.attribute_change_steps(
             node_id,
             element,
             name.local.as_ref(),
             old_value.as_deref(),
             Some(value),
+            name.ns.as_ref(),
         );
 
         element.presentational_hints.take();
@@ -506,12 +509,14 @@ impl DocumentMutator<'_> {
             .as_ref()
             .map(|attribute| attribute.value.to_string());
         let attribute_change_steps = self.doc.hooks.clone();
+        // Step 3: "Run the attribute change steps with `element`, `attribute`'s local name, `oldValue`, `newValue`, and `attribute`'s namespace."
         attribute_change_steps.attribute_change_steps(
             node_id,
             element,
             name.local.as_ref(),
             removed_value.as_deref(),
             None,
+            name.ns.as_ref(),
         );
 
         element.presentational_hints.take();
@@ -635,15 +640,14 @@ impl DocumentMutator<'_> {
     /// Remove the node from it's parent but don't drop it
     pub fn remove_node(&mut self, node_id: NodeId) {
         let node_is_in_document = self.doc.nodes[node_id].flags.is_in_document();
+        let old_ancestor = self.doc.nodes[node_id].parent;
         // Process the subtree *before* severing the parent link so that
         // interaction state referencing removed nodes can retarget to the
         // nearest surviving ancestor.
-        self.process_removed_subtree(node_id);
-
-        let node = &mut self.doc.nodes[node_id];
+        self.process_removed_subtree(node_id, old_ancestor);
 
         // Update child_idx values
-        if let Some(parent_id) = node.parent.take() {
+        if let Some(parent_id) = old_ancestor {
             self.mutations_occurred |= node_is_in_document;
             let parent = &mut self.doc.nodes[parent_id];
             parent.insert_damage(ALL_DAMAGE);
@@ -657,6 +661,7 @@ impl DocumentMutator<'_> {
                 );
             }
             self.maybe_record_node(parent_id);
+            self.doc.nodes[node_id].parent = None;
         }
     }
 
@@ -672,7 +677,8 @@ impl DocumentMutator<'_> {
         on_drop: &mut dyn FnMut(NodeId),
     ) -> Option<Node> {
         let node_is_in_document = self.doc.nodes[node_id].flags.is_in_document();
-        self.process_removed_subtree(node_id);
+        let old_ancestor = self.doc.nodes[node_id].parent;
+        self.process_removed_subtree(node_id, old_ancestor);
 
         let node = self.doc.drop_node_ignoring_parent_with(node_id, on_drop);
         self.mutations_occurred |= node_is_in_document;
@@ -710,7 +716,8 @@ impl DocumentMutator<'_> {
         }
 
         for child_id in children {
-            self.process_removed_subtree(child_id);
+            let old_ancestor = self.doc.nodes[child_id].parent;
+            self.process_removed_subtree(child_id, old_ancestor);
             let _ = self.doc.drop_node_ignoring_parent(child_id);
             if parent_is_in_doc {
                 devtools!(
@@ -903,6 +910,9 @@ impl DocumentMutator<'_> {
         // detached from stop matching :focus-within. Record them while the parent links
         // are still intact; the state is transferred after the children are reattached.
         let mut focus_within_old_chain: Option<Vec<NodeId>> = None;
+        // The parent each child was detached from, for the removing steps of a
+        // child that leaves the document in this insertion.
+        let mut old_ancestors: Vec<Option<NodeId>> = Vec::with_capacity(child_ids.len());
 
         // Detach the children from their old parents *before* inserting them into
         // the new parent (matching DOM `insertBefore` semantics). If a child is
@@ -919,7 +929,9 @@ impl DocumentMutator<'_> {
             let child = &mut self.doc.nodes[child_id];
             let child_was_in_doc = child.flags.is_in_document();
             self.mutations_occurred |= child_was_in_doc;
-            let Some(old_parent_id) = child.parent.take() else {
+            let old_parent_id = child.parent.take();
+            old_ancestors.push(old_parent_id);
+            let Some(old_parent_id) = old_parent_id else {
                 continue;
             };
 
@@ -950,7 +962,7 @@ impl DocumentMutator<'_> {
             self.restyle_for_child_list_change(parent_id, index..index + child_ids.len());
         }
 
-        for child_id in child_ids.iter().copied() {
+        for (child_id, old_ancestor) in child_ids.iter().copied().zip(old_ancestors) {
             let child = &mut self.doc.nodes[child_id];
             let child_was_in_doc = child.flags.is_in_document();
             child.parent = Some(parent_id);
@@ -973,7 +985,7 @@ impl DocumentMutator<'_> {
             if new_parent_is_in_document && !child_was_in_doc {
                 self.process_added_subtree(child_id);
             } else if !new_parent_is_in_document && child_was_in_doc {
-                self.process_removed_subtree(child_id);
+                self.process_removed_subtree(child_id, old_ancestor);
             }
         }
 
@@ -1005,6 +1017,42 @@ impl DocumentMutator<'_> {
         }
 
         self.maybe_record_node(parent_id);
+
+        // Step 7.7.1 of the DOM insert algorithm runs the insertion steps for
+        // every shadow-including inclusive descendant of each inserted node.
+        // <https://dom.spec.whatwg.org/#concept-node-insert-ext>
+        for child_id in child_ids.iter().copied() {
+            self.run_subtree_step(child_id, |hooks, node_id, element| {
+                hooks.insertion_steps(node_id, element);
+            });
+        }
+
+        // Step 10.2 of the DOM insert algorithm runs the post-connection steps
+        // for the connected nodes after every insertion step.
+        // <https://dom.spec.whatwg.org/#concept-node-post-connection-ext>
+        for child_id in child_ids.iter().copied() {
+            if self.doc.nodes[child_id].flags.is_in_document() {
+                self.run_subtree_step(child_id, |hooks, node_id, element| {
+                    hooks.post_connection_steps(node_id, element);
+                });
+            }
+        }
+    }
+
+    fn run_subtree_step(
+        &self,
+        node_id: NodeId,
+        mut step: impl FnMut(&dyn DocumentHooks, NodeId, Option<&ElementData>),
+    ) {
+        let mut node_ids = Vec::new();
+        collect_subtree_node_ids(&self.doc.nodes, node_id, &mut node_ids);
+        for node_id in node_ids {
+            step(
+                &*self.doc.hooks,
+                node_id,
+                self.doc.nodes[node_id].element_data(),
+            );
+        }
     }
 
     /// The nearest preceding sibling of `node_id` in `parent_id`'s children
@@ -1224,14 +1272,10 @@ impl<'doc> DocumentMutator<'doc> {
     }
 
     fn process_added_subtree(&mut self, node_id: NodeId) {
-        let hooks = self.doc.hooks.clone();
         self.doc.iter_subtree_mut(node_id, |node_id, doc| {
             let node = &mut doc.nodes[node_id];
             node.flags.set(NodeFlags::IS_IN_DOCUMENT, true);
             node.insert_damage(ALL_DAMAGE);
-
-            // <https://dom.spec.whatwg.org/#concept-node-insert-ext>
-            hooks.insertion_steps(node_id, node.element_data());
 
             // If the node has an "id" attribute, store it in the ID map.
             if let Some(id_attr) = node.attr(local_name!("id")).map(ToString::to_string) {
@@ -1289,20 +1333,28 @@ impl<'doc> DocumentMutator<'doc> {
             }
         });
 
-        // The post-connection steps run after every inserted node has run its
-        // insertion steps, and only for connected nodes.
-        // <https://dom.spec.whatwg.org/#concept-node-post-connection-ext>
-        self.doc.iter_subtree_mut(node_id, |node_id, doc| {
-            let node = &doc.nodes[node_id];
-            hooks.post_connection_steps(node_id, node.element_data());
-        });
-
         self.flush_eager_ops();
     }
 
-    fn process_removed_subtree(&mut self, node_id: NodeId) {
+    fn process_removed_subtree(&mut self, node_id: NodeId, old_ancestor: Option<NodeId>) {
         let hooks = self.doc.hooks.clone();
         let subtree_root = node_id;
+        let old_ancestor_element = old_ancestor
+            .and_then(|ancestor_id| self.doc.nodes.get(ancestor_id))
+            .and_then(|ancestor| ancestor.element_data());
+        let mut node_ids = Vec::new();
+        collect_subtree_node_ids(&self.doc.nodes, node_id, &mut node_ids);
+        for removed_id in node_ids {
+            // Step 11: "Run the removing steps with `node`, true, and `parent`."
+            // Step 14.1: "Run the removing steps with `descendant`, false, and `parent`."
+            // <https://dom.spec.whatwg.org/#concept-node-remove-ext>
+            hooks.removing_steps(
+                removed_id,
+                self.doc.nodes[removed_id].element_data(),
+                removed_id == subtree_root,
+                old_ancestor_element,
+            );
+        }
         self.doc.iter_subtree_mut(node_id, |node_id, doc| {
             doc.nodes[node_id]
                 .flags
@@ -1314,9 +1366,6 @@ impl<'doc> DocumentMutator<'doc> {
             doc.clear_interaction_state_for_removed_node(node_id);
 
             let node = &mut doc.nodes[node_id];
-
-            // <https://dom.spec.whatwg.org/#concept-node-remove-ext>
-            hooks.removing_steps(node_id, node.element_data(), node_id == subtree_root);
 
             // Clear the text selection if one of its endpoints references this node.
             // This prevents stale selection endpoint references.
@@ -1411,6 +1460,16 @@ impl<'doc> DocumentMutator<'doc> {
     fn load_linked_stylesheet(&mut self, target_id: NodeId) {
         let node = &self.doc.nodes[target_id];
 
+        let mut is_in_head = false;
+        let mut parent_id = node.parent;
+        while let Some(id) = parent_id
+            && !is_in_head
+        {
+            let parent = &self.doc.nodes[id];
+            is_in_head |= parent.data.is_element_with_tag_name(&local_name!("head"));
+            parent_id = parent.parent;
+        }
+
         let rel_attr = node.attr(local_name!("rel"));
         let href_attr = node.attr(local_name!("href"));
 
@@ -1427,10 +1486,21 @@ impl<'doc> DocumentMutator<'doc> {
         let Some(url) = self.doc.resolve_url(href) else {
             return;
         };
+        let request_id = if is_in_head && !self.doc.hooks.is_noop() {
+            // The document load event waits for a stylesheet linked from the
+            // head: its node identifies the pending resource until the embedder
+            // echoes the id back with the load result.
+            let request_id = node.id.as_u64() as usize;
+            self.doc.pending_critical_resources.insert(request_id);
+            Some(request_id)
+        } else {
+            None
+        };
         let hooks = self.doc.hooks.clone();
         hooks.resource_request(ResourceRequest::Stylesheet {
             node_id: node.id,
             url,
+            request_id,
         });
     }
 
@@ -1667,6 +1737,13 @@ impl Drop for ViewportMut<'_> {
 
         let changes = DeviceChanges::from_viewports(&self.initial_viewport, &self.doc.viewport);
         self.doc.queue_device_changes(changes);
+    }
+}
+
+fn collect_subtree_node_ids(nodes: &NodeTree, node_id: NodeId, node_ids: &mut Vec<NodeId>) {
+    node_ids.push(node_id);
+    for child_id in nodes[node_id].children.iter().copied() {
+        collect_subtree_node_ids(nodes, child_id, node_ids);
     }
 }
 

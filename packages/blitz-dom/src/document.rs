@@ -347,6 +347,7 @@ pub struct BaseDocument {
 
     // Tracks in-flight "critical" resources (e.g. stylesheets linked from the `<head>`),
     // keyed by request id
+    /// Whether the document has pending requests for "critical" resources (that should block rendering)
     pub(crate) pending_critical_resources: HashSet<usize>,
 
     // Service providers
@@ -1178,8 +1179,11 @@ impl BaseDocument {
             }
         }
         for (node_id, url) in requests {
-            self.hooks
-                .resource_request(ResourceRequest::Stylesheet { node_id, url });
+            self.hooks.resource_request(ResourceRequest::Stylesheet {
+                node_id,
+                url,
+                request_id: None,
+            });
         }
     }
 
@@ -1238,8 +1242,7 @@ impl BaseDocument {
         )
     }
 
-    /// Install the stylesheet content for one pending `@import` rule.
-    /// <https://drafts.csswg.org/css-cascade/#at-import>
+    /// Installs a fetched `@import` stylesheet into its pending import rule.
     pub fn complete_stylesheet_import(&mut self, url: &str, css: &str) {
         let mut pending_imports = self.pending_stylesheet_imports.lock().unwrap();
         let Some(position) = pending_imports
@@ -1347,12 +1350,22 @@ impl BaseDocument {
         self.rx = Some(rx);
     }
 
+    /// Stops waiting for the stylesheet reported for `node_id` (for example
+    /// one whose fetch failed).
+    /// Stops waiting for a resource reported with a `request_id` that will
+    /// not be installed (for example a stylesheet whose fetch failed).
+    pub fn cancel_pending_resource(&mut self, request_id: usize) {
+        self.pending_critical_resources.remove(&request_id);
+    }
+
     /// Whether the Document has pending requests for "critical" resources (that should block rendering)
     pub fn has_pending_critical_resources(&self) -> bool {
         !self.pending_critical_resources.is_empty()
     }
 
     pub fn load_resource(&mut self, res: ResourceLoadResponse) {
+        // A load result releases the resource it reports, whether it installs
+        // or fails: a render-blocking resource must not hold the document.
         self.pending_critical_resources.remove(&res.request_id);
 
         let resource = match res.result {
@@ -1473,12 +1486,13 @@ impl BaseDocument {
         }
     }
 
-    /// Set the intrinsic size of an `<img>` element whose pixels the
-    /// embedding application decodes and paints itself.  Pass a zero-length
-    /// pixel buffer: the element contributes no paint source to the
-    /// document scene and only its intrinsic size is used for layout.
-    /// <https://html.spec.whatwg.org/multipage/images.html#image-request>
+    /// Applies an image request's dimensions to an `<img>` element for
+    /// layout.  Pass a zero-length pixel buffer: the element contributes no
+    /// paint source to the document scene and only its intrinsic size is
+    /// used for layout.
     pub fn set_image_intrinsic_size(&mut self, node_id: NodeId, width: u32, height: u32) {
+        // Serves step 27's prepare-an-image-for-presentation for an embedder
+        // that paints the element's pixels itself.
         let Some(node) = self.get_node_mut(node_id) else {
             return;
         };
