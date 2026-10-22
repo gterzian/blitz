@@ -1,5 +1,5 @@
 use crate::HtmlParserProvider;
-use crate::resource::DocumentHooks;
+use crate::resource::{MutationHooks, ResourceHooks};
 use blitz_traits::{
     navigation::NavigationProvider,
     shell::{ShellProvider, Viewport},
@@ -37,9 +37,10 @@ pub struct DocumentConfig {
     pub base_url: Option<String>,
     /// User Agent stylesheets
     pub ua_stylesheets: Option<Vec<String>>,
-    /// Hooks that receive the document's subresource requests and DOM tree
-    /// mutation notifications.
-    pub hooks: Option<Arc<dyn DocumentHooks>>,
+    /// Hooks that receive the document's DOM mutation notifications.
+    pub mutation_hooks: Option<Arc<dyn MutationHooks>>,
+    /// Hooks that receive the document's subresource requests.
+    pub resource_hooks: Option<Arc<dyn ResourceHooks>>,
     /// Navigation provider to handle link clicks and form submissions
     pub navigation_provider: Option<Arc<dyn NavigationProvider>>,
     /// Shell provider to redraw requests, clipboard, etc

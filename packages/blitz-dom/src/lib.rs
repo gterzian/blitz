@@ -83,7 +83,10 @@ pub use markup5ever::{
 pub use mutator::DocumentMutator;
 pub use node::{Attribute, ElementData, Node, NodeData, Status, TextNodeData};
 pub use parley::FontContext;
-pub use resource::{DocumentHooks, FontFaceOverrides, NoopDocumentHooks, ResourceRequest};
+pub use resource::{
+    FontFaceOverrides, MutationHooks, NoopMutationHooks, NoopResourceHooks, ResourceHooks,
+    ResourceRequest,
+};
 pub use style::Atom;
 pub use style::invalidation::element::restyle_hints::RestyleHint;
 pub use style::media_queries::MediaType;

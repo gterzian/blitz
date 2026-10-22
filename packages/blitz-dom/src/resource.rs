@@ -74,10 +74,8 @@ pub struct FontFaceOverrides {
     pub style: Option<FontiqueFontStyle>,
 }
 
-/// The DOM-tree and subresource hooks of one document.
-pub trait DocumentHooks: Send + Sync + 'static {
-    fn resource_request(&self, _request: ResourceRequest) {}
-
+/// <https://dom.spec.whatwg.org/#mutation-algorithms>
+pub trait MutationHooks: Send + Sync + 'static {
     /// <https://dom.spec.whatwg.org/#concept-element-attributes-change-ext>
     fn attribute_change_steps(
         &self,
@@ -107,11 +105,20 @@ pub trait DocumentHooks: Send + Sync + 'static {
     }
 }
 
-/// Hooks for an embedding application that needs no tree or subresource
-/// notifications.
-pub struct NoopDocumentHooks;
+/// The document's subresource requests, reported by the embedding application.
+pub trait ResourceHooks: Send + Sync + 'static {
+    fn resource_request(&self, _request: ResourceRequest) {}
+}
 
-impl DocumentHooks for NoopDocumentHooks {}
+/// Hooks for an embedding application that needs no mutation notifications.
+pub struct NoopMutationHooks;
+
+impl MutationHooks for NoopMutationHooks {}
+
+/// Hooks for an embedding application that needs no subresource requests.
+pub struct NoopResourceHooks;
+
+impl ResourceHooks for NoopResourceHooks {}
 
 #[derive(Clone, Debug)]
 pub enum Resource {
@@ -143,7 +150,7 @@ pub(crate) struct PendingStylesheetImport {
 #[derive(Clone)]
 pub(crate) struct StylesheetLoader {
     pub(crate) pending_imports: Arc<Mutex<Vec<PendingStylesheetImport>>>,
-    pub(crate) hooks: Arc<dyn DocumentHooks>,
+    pub(crate) resource_hooks: Arc<dyn ResourceHooks>,
 }
 
 impl ServoStylesheetLoader for StylesheetLoader {
@@ -186,7 +193,7 @@ impl ServoStylesheetLoader for StylesheetLoader {
                 loader: self.clone(),
             });
         }
-        self.hooks
+        self.resource_hooks
             .resource_request(ResourceRequest::StylesheetImport {
                 url: url.as_ref().clone(),
             });

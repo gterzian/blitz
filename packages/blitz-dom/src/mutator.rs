@@ -1,3 +1,7 @@
+//! The DOM Standard's mutation algorithms
+//! (<https://dom.spec.whatwg.org/#mutation-algorithms>) and the
+//! [`MutationHooks`](crate::MutationHooks) they invoke.
+
 use std::collections::HashSet;
 use std::mem;
 use std::ops::{Deref, DerefMut};
@@ -5,7 +9,7 @@ use std::ops::{Deref, DerefMut};
 use crate::document::make_device;
 use crate::layout::damage::ALL_DAMAGE;
 use crate::node::{CanvasData, NodeFlags, SpecialElementData};
-use crate::resource::{DocumentHooks, ResourceRequest};
+use crate::resource::{MutationHooks, ResourceRequest};
 use crate::util::ImageType;
 use crate::{
     Attribute, BaseDocument, Document, ElementData, Node, NodeData, QualName, local_name, qual_name,
@@ -146,6 +150,7 @@ impl DocumentMutator<'_> {
         id
     }
 
+    /// <https://dom.spec.whatwg.org/#concept-node-clone>
     pub fn deep_clone_node(&mut self, node_id: usize) -> usize {
         self.doc.deep_clone_node(node_id)
     }
@@ -214,6 +219,7 @@ impl DocumentMutator<'_> {
         }
     }
 
+    /// <https://dom.spec.whatwg.org/#concept-element-attributes-set-value>
     pub fn set_attribute(&mut self, node_id: usize, name: QualName, value: &str) {
         self.doc.snapshot_node(node_id);
 
@@ -257,7 +263,8 @@ impl DocumentMutator<'_> {
             .get(&name)
             .map(|attribute| attribute.value.to_string());
         element.attrs.set(name.clone(), value);
-        let attribute_change_steps = self.doc.hooks.clone();
+        let attribute_change_steps = self.doc.mutation_hooks.clone();
+        // <https://dom.spec.whatwg.org/#concept-element-attributes-change-ext>
         // Step 3: "Run the attribute change steps with `element`, `attribute`'s local name, `oldValue`, `newValue`, and `attribute`'s namespace."
         attribute_change_steps.attribute_change_steps(
             node_id,
@@ -315,6 +322,7 @@ impl DocumentMutator<'_> {
         }
     }
 
+    /// <https://dom.spec.whatwg.org/#concept-element-attributes-remove>
     pub fn clear_attribute(&mut self, node_id: usize, name: QualName) {
         self.doc.snapshot_node(node_id);
 
@@ -341,7 +349,8 @@ impl DocumentMutator<'_> {
         let removed_value = removed_attr
             .as_ref()
             .map(|attribute| attribute.value.to_string());
-        let attribute_change_steps = self.doc.hooks.clone();
+        let attribute_change_steps = self.doc.mutation_hooks.clone();
+        // <https://dom.spec.whatwg.org/#concept-element-attributes-change-ext>
         // Step 3: "Run the attribute change steps with `element`, `attribute`'s local name, `oldValue`, `newValue`, and `attribute`'s namespace."
         attribute_change_steps.attribute_change_steps(
             node_id,
@@ -420,7 +429,7 @@ impl DocumentMutator<'_> {
         self.doc.remove_custom_widget(node_id)
     }
 
-    /// Remove the node from it's parent but don't drop it
+    /// <https://dom.spec.whatwg.org/#concept-node-remove>
     pub fn remove_node(&mut self, node_id: usize) {
         let old_ancestor = self.doc.nodes[node_id].parent;
         // Update child_idx values
@@ -496,13 +505,14 @@ impl DocumentMutator<'_> {
         }
     }
 
-    /// Remove all of the children from old_parent_id and append them to new_parent_id
+    /// <https://dom.spec.whatwg.org/#concept-node-insert>
     pub fn append_children(&mut self, parent_id: usize, child_ids: &[usize]) {
         self.add_children_to_parent(parent_id, child_ids, &|parent, child_ids| {
             parent.children.extend_from_slice(child_ids);
         });
     }
 
+    /// <https://dom.spec.whatwg.org/#concept-node-insert>
     pub fn insert_nodes_before(&mut self, anchor_node_id: usize, new_node_ids: &[usize]) {
         let parent_id = self.doc.nodes[anchor_node_id].parent.unwrap();
         self.add_children_to_parent(parent_id, new_node_ids, &|parent, child_ids| {
@@ -513,6 +523,7 @@ impl DocumentMutator<'_> {
         });
     }
 
+    /// <https://dom.spec.whatwg.org/#concept-node-insert>
     fn add_children_to_parent(
         &mut self,
         parent_id: usize,
@@ -572,8 +583,9 @@ impl DocumentMutator<'_> {
             });
         }
 
-        // Step 10.2 of the DOM insert algorithm runs the post-connection steps
-        // for the connected nodes after every insertion step.
+        // Step 12 of the DOM insert algorithm runs the post-connection steps
+        // for each connected node in `staticNodeList`, after every insertion
+        // step.
         // <https://dom.spec.whatwg.org/#concept-node-post-connection-ext>
         for child_id in child_ids.iter().copied() {
             if self.doc.nodes[child_id].flags.is_in_document() {
@@ -587,13 +599,13 @@ impl DocumentMutator<'_> {
     fn run_subtree_step(
         &self,
         node_id: usize,
-        mut step: impl FnMut(&dyn DocumentHooks, usize, Option<&ElementData>),
+        mut step: impl FnMut(&dyn MutationHooks, usize, Option<&ElementData>),
     ) {
         let mut node_ids = Vec::new();
         collect_subtree_node_ids(&self.doc.nodes, node_id, &mut node_ids);
         for node_id in node_ids {
             step(
-                &*self.doc.hooks,
+                &*self.doc.mutation_hooks,
                 node_id,
                 self.doc.nodes[node_id].element_data(),
             );
@@ -611,12 +623,14 @@ impl DocumentMutator<'_> {
         }
     }
 
+    /// <https://dom.spec.whatwg.org/#concept-node-insert>
     pub fn reparent_children(&mut self, old_parent_id: usize, new_parent_id: usize) {
         let child_ids = std::mem::take(&mut self.doc.nodes[old_parent_id].children);
         self.maybe_record_node(old_parent_id);
         self.append_children(new_parent_id, &child_ids);
     }
 
+    /// <https://dom.spec.whatwg.org/#concept-node-replace>
     pub fn replace_node_with(&mut self, anchor_node_id: usize, new_node_ids: &[usize]) {
         self.insert_nodes_before(anchor_node_id, new_node_ids);
         self.remove_node(anchor_node_id);
@@ -728,8 +742,9 @@ impl<'doc> DocumentMutator<'doc> {
         self.flush_eager_ops();
     }
 
+    /// <https://dom.spec.whatwg.org/#concept-node-remove>
     fn process_removed_subtree(&mut self, node_id: usize, old_ancestor: Option<usize>) {
-        let hooks = self.doc.hooks.clone();
+        let hooks = self.doc.mutation_hooks.clone();
         let subtree_root = node_id;
         let old_ancestor_element = old_ancestor
             .and_then(|ancestor_id| self.doc.nodes.get(ancestor_id))
@@ -865,7 +880,7 @@ impl<'doc> DocumentMutator<'doc> {
         } else {
             None
         };
-        let hooks = self.doc.hooks.clone();
+        let hooks = self.doc.resource_hooks.clone();
         hooks.resource_request(ResourceRequest::Stylesheet {
             node_id: node.id,
             url,
@@ -906,7 +921,7 @@ impl<'doc> DocumentMutator<'doc> {
             return;
         }
         let src = self.doc.resolve_url(raw_src);
-        let hooks = self.doc.hooks.clone();
+        let hooks = self.doc.resource_hooks.clone();
         hooks.resource_request(ResourceRequest::Image {
             node_id: target_id,
             url: src,
