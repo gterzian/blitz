@@ -1,4 +1,4 @@
-use crate::resource::DocumentHooks;
+use crate::resource::{MutationHooks, ResourceHooks};
 use crate::{HtmlParserProvider, UserAgentStylesheet};
 #[cfg(feature = "devtools")]
 use blitz_traits::devtools::DevtoolsProvider;
@@ -39,9 +39,10 @@ pub struct DocumentConfig {
     /// The list is used as given, so replacing it removes the default sheet unless it is
     /// included, e.g. `vec![UserAgentStylesheet::default_sheet(), custom]`.
     pub ua_stylesheets: Vec<UserAgentStylesheet>,
-    /// Hooks that receive the document's subresource requests and DOM tree
-    /// mutation notifications.
-    pub hooks: Option<Arc<dyn DocumentHooks>>,
+    /// Hooks that receive the document's DOM mutation notifications.
+    pub mutation_hooks: Option<Arc<dyn MutationHooks>>,
+    /// Hooks that receive the document's subresource requests.
+    pub resource_hooks: Option<Arc<dyn ResourceHooks>>,
     /// Navigation provider to handle link clicks and form submissions
     pub navigation_provider: Option<Arc<dyn NavigationProvider>>,
     /// Shell provider to redraw requests, clipboard, etc
@@ -81,7 +82,8 @@ impl Default for DocumentConfig {
             viewport: None,
             base_url: None,
             ua_stylesheets: vec![UserAgentStylesheet::default_sheet()],
-            hooks: None,
+            mutation_hooks: None,
+            resource_hooks: None,
             navigation_provider: None,
             shell_provider: None,
             html_parser_provider: None,

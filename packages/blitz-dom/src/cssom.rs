@@ -332,7 +332,7 @@ impl BaseDocument {
     fn stylesheet_loader(&self) -> StylesheetLoader {
         StylesheetLoader {
             pending_imports: self.pending_stylesheet_imports.clone(),
-            hooks: self.hooks.clone(),
+            resource_hooks: self.resource_hooks.clone(),
             import_depth: 0,
         }
     }
@@ -513,7 +513,7 @@ impl BaseDocument {
             for (url, overrides) in
                 collect_font_face_requests_in_rules(std::iter::once(&new_rule), &guard)
             {
-                self.hooks.resource_request(ResourceRequest::Font {
+                self.resource_hooks.resource_request(ResourceRequest::Font {
                     node_id: Some(node_id),
                     url,
                     overrides,

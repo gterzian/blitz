@@ -87,16 +87,8 @@ pub struct FontFaceOverrides {
     pub width: Option<parley::fontique::FontWidth>,
 }
 
-/// The DOM-tree and subresource hooks of one document.
-pub trait DocumentHooks: Send + Sync + 'static {
-    fn resource_request(&self, _request: ResourceRequest) {}
-
-    /// Whether this implementation loads nothing at all, in which case a
-    /// document must not wait for the resources it reports.
-    fn is_noop(&self) -> bool {
-        false
-    }
-
+/// <https://dom.spec.whatwg.org/#mutation-algorithms>
+pub trait MutationHooks: Send + Sync + 'static {
     /// <https://dom.spec.whatwg.org/#concept-element-attributes-change-ext>
     fn attribute_change_steps(
         &self,
@@ -126,11 +118,26 @@ pub trait DocumentHooks: Send + Sync + 'static {
     }
 }
 
-/// Hooks for an embedding application that needs no tree or subresource
-/// notifications.
-pub struct NoopDocumentHooks;
+/// The document's subresource requests, reported by the embedding application.
+pub trait ResourceHooks: Send + Sync + 'static {
+    fn resource_request(&self, _request: ResourceRequest) {}
 
-impl DocumentHooks for NoopDocumentHooks {
+    /// Whether this implementation loads nothing at all, in which case a
+    /// document must not wait for the resources it reports.
+    fn is_noop(&self) -> bool {
+        false
+    }
+}
+
+/// Hooks for an embedding application that needs no mutation notifications.
+pub struct NoopMutationHooks;
+
+impl MutationHooks for NoopMutationHooks {}
+
+/// Hooks for an embedding application that needs no subresource requests.
+pub struct NoopResourceHooks;
+
+impl ResourceHooks for NoopResourceHooks {
     fn is_noop(&self) -> bool {
         true
     }
@@ -168,7 +175,7 @@ pub(crate) struct PendingStylesheetImport {
 #[derive(Clone)]
 pub(crate) struct StylesheetLoader {
     pub(crate) pending_imports: Arc<Mutex<Vec<PendingStylesheetImport>>>,
-    pub(crate) hooks: Arc<dyn DocumentHooks>,
+    pub(crate) resource_hooks: Arc<dyn ResourceHooks>,
     /// Depth of `@import` nesting for the stylesheet this loader is parsing
     /// (0 for a top-level stylesheet).
     pub(crate) import_depth: usize,
@@ -220,7 +227,7 @@ impl ServoStylesheetLoader for StylesheetLoader {
                 loader: self.clone(),
             });
         }
-        self.hooks
+        self.resource_hooks
             .resource_request(ResourceRequest::StylesheetImport {
                 url: url.as_ref().clone(),
             });

@@ -103,7 +103,10 @@ pub use markup5ever::{
 pub use mutator::DocumentMutator;
 pub use node::{Attribute, DocumentData, ElementData, Node, NodeData, Status, TextNodeData};
 pub use parley::FontContext;
-pub use resource::{DocumentHooks, FontFaceOverrides, NoopDocumentHooks, ResourceRequest};
+pub use resource::{
+    FontFaceOverrides, MutationHooks, NoopMutationHooks, NoopResourceHooks, ResourceHooks,
+    ResourceRequest,
+};
 pub use scrolling::{ScrollBehavior, ScrollLogicalPosition};
 pub use stylo::UserAgentStylesheet;
 pub use tree::NodeTree;

@@ -5,8 +5,9 @@ use crate::layout::damage::ALL_DAMAGE;
 use crate::mutator::ViewportMut;
 use crate::node::{ImageData, NodeFlags, RasterImageData, SpecialElementData, Status, TextBrush};
 use crate::resource::{
-    DocumentHooks, NoopDocumentHooks, PendingStylesheetImport, Resource, ResourceLoadResponse,
-    ResourceRequest, StylesheetLoader, collect_font_face_requests, make_stylesheet,
+    MutationHooks, NoopMutationHooks, NoopResourceHooks, PendingStylesheetImport, Resource,
+    ResourceHooks, ResourceLoadResponse, ResourceRequest, StylesheetLoader,
+    collect_font_face_requests, make_stylesheet,
 };
 use crate::scrolling::ScrollAnimationState;
 use crate::selection::TextSelection;
@@ -351,9 +352,10 @@ pub struct BaseDocument {
     pub(crate) pending_critical_resources: HashSet<usize>,
 
     // Service providers
-    /// Hooks that receive the document's subresource requests and DOM tree
-    /// mutation notifications.
-    pub hooks: Arc<dyn DocumentHooks>,
+    /// Hooks that receive the document's DOM mutation notifications.
+    pub mutation_hooks: Arc<dyn MutationHooks>,
+    /// Hooks that receive the document's subresource requests.
+    pub resource_hooks: Arc<dyn ResourceHooks>,
     /// Navigation provider. Can be used to navigate to a new page (bubbles up the event
     /// on e.g. clicking a Link)
     pub navigation_provider: Arc<dyn NavigationProvider>,
@@ -445,7 +447,12 @@ impl BaseDocument {
             .and_then(|url| DocumentUrl::from_str(&url).ok())
             .unwrap_or_default();
 
-        let hooks = config.hooks.unwrap_or_else(|| Arc::new(NoopDocumentHooks));
+        let mutation_hooks = config
+            .mutation_hooks
+            .unwrap_or_else(|| Arc::new(NoopMutationHooks));
+        let resource_hooks = config
+            .resource_hooks
+            .unwrap_or_else(|| Arc::new(NoopResourceHooks));
         let navigation_provider = config
             .navigation_provider
             .unwrap_or_else(|| Arc::new(DummyNavigationProvider));
@@ -511,7 +518,8 @@ impl BaseDocument {
             pending_style_image_nodes: Vec::new(),
             pending_critical_resources: HashSet::new(),
             controls_to_form: HashMap::new(),
-            hooks,
+            mutation_hooks,
+            resource_hooks,
             navigation_provider,
             shell_provider,
             html_parser_provider,
@@ -640,11 +648,12 @@ impl BaseDocument {
         tracing::info!("Fetching image {url}");
         self.pending_images
             .insert(url.as_str().to_string(), vec![waiting]);
-        self.hooks.resource_request(ResourceRequest::Image {
-            node_id,
-            url,
-            image_type,
-        });
+        self.resource_hooks
+            .resource_request(ResourceRequest::Image {
+                node_id,
+                url,
+                image_type,
+            });
     }
 
     pub fn favicon_url(&self) -> Option<String> {
@@ -1179,11 +1188,12 @@ impl BaseDocument {
             }
         }
         for (node_id, url) in requests {
-            self.hooks.resource_request(ResourceRequest::Stylesheet {
-                node_id,
-                url,
-                request_id: None,
-            });
+            self.resource_hooks
+                .resource_request(ResourceRequest::Stylesheet {
+                    node_id,
+                    url,
+                    request_id: None,
+                });
         }
     }
 
@@ -1229,7 +1239,7 @@ impl BaseDocument {
     pub fn make_stylesheet(&self, css: impl AsRef<str>, origin: Origin) -> DocumentStyleSheet {
         let loader = StylesheetLoader {
             pending_imports: self.pending_stylesheet_imports.clone(),
-            hooks: self.hooks.clone(),
+            resource_hooks: self.resource_hooks.clone(),
             import_depth: 0,
         };
         make_stylesheet(
@@ -1270,7 +1280,7 @@ impl BaseDocument {
         ));
 
         for (font_url, overrides) in collect_font_face_requests(&sheet, &import.lock.read()) {
-            self.hooks.resource_request(ResourceRequest::Font {
+            self.resource_hooks.resource_request(ResourceRequest::Font {
                 node_id: None,
                 url: font_url,
                 overrides,
@@ -1300,7 +1310,7 @@ impl BaseDocument {
         }
 
         for (url, overrides) in collect_font_face_requests(&stylesheet.0, &self.guard.read()) {
-            self.hooks.resource_request(ResourceRequest::Font {
+            self.resource_hooks.resource_request(ResourceRequest::Font {
                 node_id: Some(node_id),
                 url,
                 overrides,

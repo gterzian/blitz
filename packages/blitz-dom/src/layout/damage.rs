@@ -548,7 +548,7 @@ impl BaseDocument {
     /// Flush a CSS image layer list (`background-image` or `mask-image`) from style
     /// to dedicated storage on the node, fetching any images which are not yet loaded.
     fn flush_image_layers_from_style(&mut self, node_id: NodeId, kind: ImageLayerKind) {
-        let hooks = self.hooks.clone();
+        let hooks = self.resource_hooks.clone();
         let node = self.nodes.get_mut(node_id).unwrap();
         // Clone the primary style `Arc` into an owned value so the immutable
         // borrow of `node` (held by the stylo element data guard) is released

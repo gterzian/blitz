@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use blitz_dom::{DocGuard, DocGuardMut, Document, DocumentConfig, DocumentHooks};
+use blitz_dom::{DocGuard, DocGuardMut, Document, DocumentConfig, MutationHooks, ResourceHooks};
 use blitz_html::{HtmlDocument, HtmlProvider};
 use blitz_traits::events::UiEvent;
 use blitz_traits::shell::{ColorScheme, Viewport};
@@ -15,8 +15,10 @@ pub struct HarnessOptions {
     pub color_scheme: ColorScheme,
     /// Base url which relative URLs are resolved against
     pub base_url: Option<String>,
+    /// Hooks used to observe DOM mutations
+    pub mutation_hooks: Option<Arc<dyn MutationHooks>>,
     /// Hooks used to load sub-resources (stylesheets, images, fonts, etc)
-    pub hooks: Option<Arc<dyn DocumentHooks>>,
+    pub resource_hooks: Option<Arc<dyn ResourceHooks>>,
 }
 
 impl Default for HarnessOptions {
@@ -27,7 +29,8 @@ impl Default for HarnessOptions {
             scale: 1.0,
             color_scheme: ColorScheme::Light,
             base_url: None,
-            hooks: None,
+            mutation_hooks: None,
+            resource_hooks: None,
         }
     }
 }
@@ -42,7 +45,8 @@ impl HarnessOptions {
                 self.color_scheme,
             )),
             base_url: self.base_url,
-            hooks: self.hooks,
+            mutation_hooks: self.mutation_hooks,
+            resource_hooks: self.resource_hooks,
             html_parser_provider: Some(Arc::new(HtmlProvider) as _),
             ..Default::default()
         }

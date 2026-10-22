@@ -54,7 +54,8 @@ impl BaseDocument {
             // A sub-document's subresource requests name its own nodes, so the
             // parent's hooks cannot serve it: an embedder that loads iframe
             // sub-resources instantiates the sub-document itself.
-            hooks: None,
+            mutation_hooks: None,
+            resource_hooks: None,
             navigation_provider: Some(Arc::new(IframeNavigationProvider {
                 node_id,
                 tx: self.tx.clone(),
@@ -119,11 +120,12 @@ impl BaseDocument {
     /// when the response arrives (via [`DocumentEvent::ResourceLoad`]).
     pub(crate) fn start_iframe_load(&mut self, node_id: NodeId, url: Url) {
         let request_id = self.new_iframe_generation(node_id, true);
-        self.hooks.resource_request(ResourceRequest::SubDocument {
-            node_id,
-            request_id,
-            url,
-        });
+        self.resource_hooks
+            .resource_request(ResourceRequest::SubDocument {
+                node_id,
+                request_id,
+                url,
+            });
     }
 
     /// Handle a navigation originating from within an iframe's sub-document
