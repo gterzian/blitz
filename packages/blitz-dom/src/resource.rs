@@ -75,7 +75,7 @@ pub struct FontFaceOverrides {
 }
 
 /// <https://dom.spec.whatwg.org/#mutation-algorithms>
-pub trait MutationHooks: Send + Sync + 'static {
+pub trait MutationHooks: 'static {
     /// <https://dom.spec.whatwg.org/#concept-element-attributes-change-ext>
     fn attribute_change_steps(
         &self,
@@ -106,7 +106,7 @@ pub trait MutationHooks: Send + Sync + 'static {
 }
 
 /// The document's subresource requests, reported by the embedding application.
-pub trait ResourceHooks: Send + Sync + 'static {
+pub trait ResourceHooks: 'static {
     fn resource_request(&self, _request: ResourceRequest) {}
 }
 
