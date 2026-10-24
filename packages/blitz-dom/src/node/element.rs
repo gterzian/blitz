@@ -209,6 +209,23 @@ impl ElementData {
         }
     }
 
+    /// The load state of this element's image resource.
+    ///
+    /// Returns `None` for elements that are not `<img>`. An `<img>` whose
+    /// resource has not resolved yet is `Loading`, one whose fetch failed (or
+    /// whose data is unavailable) is `Error`, and one with image data present
+    /// is `Ok`.
+    pub fn image_status(&self) -> Option<Status> {
+        match &self.special_data {
+            SpecialElementData::Image(data) => Some(match data.as_ref() {
+                ImageData::None => Status::Error,
+                _ => Status::Ok,
+            }),
+            _ if self.name.local.as_ref() == "img" => Some(Status::Loading),
+            _ => None,
+        }
+    }
+
     pub fn raster_image_data_mut(&mut self) -> Option<&mut RasterImageData> {
         match self.image_data_mut()? {
             ImageData::Raster(data) => Some(data),
@@ -458,7 +475,7 @@ impl ElementData {
         self.special_data = SpecialElementData::None;
         resource_ids
     }
-    
+
     pub fn take_inline_layout(&mut self) -> Option<Box<TextLayout>> {
         std::mem::take(&mut self.inline_layout_data)
     }

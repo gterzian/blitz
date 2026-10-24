@@ -65,7 +65,7 @@ mod url;
 
 pub use stylo_to_kurbo::resolve_2d_transform;
 
-pub mod net;
+pub mod resource;
 pub mod util;
 
 #[cfg(feature = "accessibility")]
@@ -75,14 +75,18 @@ mod accessibility;
 pub use crate::node::Widget;
 
 pub use config::{DocumentConfig, StyleThreading};
-pub use document::{BaseDocument, DocGuard, DocGuardMut, Document, PlainDocument};
+pub use document::{BaseDocument, DocGuard, DocGuardMut, Document, DocumentEvent, PlainDocument};
 pub use markup5ever::{
     LocalName, Namespace, NamespaceStaticSet, Prefix, PrefixStaticSet, QualName, local_name,
     namespace_prefix, namespace_url, ns,
 };
 pub use mutator::DocumentMutator;
-pub use node::{Attribute, ElementData, Node, NodeData, TextNodeData};
+pub use node::{Attribute, ElementData, Node, NodeData, Status, TextNodeData};
 pub use parley::FontContext;
+pub use resource::{
+    FontFaceOverrides, MutationHooks, NoopMutationHooks, NoopResourceHooks, ResourceHooks,
+    ResourceRequest,
+};
 pub use style::Atom;
 pub use style::invalidation::element::restyle_hints::RestyleHint;
 pub use style::media_queries::MediaType;

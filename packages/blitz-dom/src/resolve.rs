@@ -49,9 +49,6 @@ impl BaseDocument {
             return;
         }
 
-        // Process messages that have been sent to our message channel (e.g. loaded resource)
-        self.handle_messages();
-
         self.resolve_scroll_animation();
 
         let root_node_id = self.root_element().id;
