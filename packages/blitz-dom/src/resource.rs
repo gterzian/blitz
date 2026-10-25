@@ -8,6 +8,7 @@ use crate::node::ElementData;
 use crate::util::ImageType;
 use blitz_traits::net::Bytes;
 use parley::fontique::FontStyle as FontiqueFontStyle;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use style::{
     font_face::{
@@ -150,7 +151,7 @@ pub(crate) struct PendingStylesheetImport {
 #[derive(Clone)]
 pub(crate) struct StylesheetLoader {
     pub(crate) pending_imports: Arc<Mutex<Vec<PendingStylesheetImport>>>,
-    pub(crate) resource_hooks: Arc<dyn ResourceHooks>,
+    pub(crate) resource_hooks: Rc<dyn ResourceHooks>,
 }
 
 impl ServoStylesheetLoader for StylesheetLoader {

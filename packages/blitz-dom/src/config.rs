@@ -5,6 +5,7 @@ use blitz_traits::{
     shell::{ShellProvider, Viewport},
 };
 use parley::FontContext;
+use std::rc::Rc;
 use std::sync::Arc;
 use style::media_queries::MediaType;
 
@@ -38,9 +39,9 @@ pub struct DocumentConfig {
     /// User Agent stylesheets
     pub ua_stylesheets: Option<Vec<String>>,
     /// Hooks that receive the document's DOM mutation notifications.
-    pub mutation_hooks: Option<Arc<dyn MutationHooks>>,
+    pub mutation_hooks: Option<Rc<dyn MutationHooks>>,
     /// Hooks that receive the document's subresource requests.
-    pub resource_hooks: Option<Arc<dyn ResourceHooks>>,
+    pub resource_hooks: Option<Rc<dyn ResourceHooks>>,
     /// Navigation provider to handle link clicks and form submissions
     pub navigation_provider: Option<Arc<dyn NavigationProvider>>,
     /// Shell provider to redraw requests, clipboard, etc

@@ -294,9 +294,9 @@ pub struct BaseDocument {
 
     // Service providers
     /// Hooks that receive the document's DOM mutation notifications.
-    pub mutation_hooks: Arc<dyn MutationHooks>,
+    pub mutation_hooks: Rc<dyn MutationHooks>,
     /// Hooks that receive the document's subresource requests.
-    pub resource_hooks: Arc<dyn ResourceHooks>,
+    pub resource_hooks: Rc<dyn ResourceHooks>,
     /// Navigation provider. Can be used to navigate to a new page (bubbles up the event
     /// on e.g. clicking a Link)
     pub navigation_provider: Arc<dyn NavigationProvider>,
@@ -388,10 +388,10 @@ impl BaseDocument {
 
         let mutation_hooks = config
             .mutation_hooks
-            .unwrap_or_else(|| Arc::new(NoopMutationHooks));
+            .unwrap_or_else(|| Rc::new(NoopMutationHooks));
         let resource_hooks = config
             .resource_hooks
-            .unwrap_or_else(|| Arc::new(NoopResourceHooks));
+            .unwrap_or_else(|| Rc::new(NoopResourceHooks));
         let navigation_provider = config
             .navigation_provider
             .unwrap_or_else(|| Arc::new(DummyNavigationProvider));
