@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::sync::Arc;
 
 use blitz_dom::{DocGuard, DocGuardMut, Document, DocumentConfig, MutationHooks, ResourceHooks};
@@ -16,9 +17,9 @@ pub struct HarnessOptions {
     /// Base url which relative URLs are resolved against
     pub base_url: Option<String>,
     /// Hooks used to observe DOM mutations
-    pub mutation_hooks: Option<Arc<dyn MutationHooks>>,
+    pub mutation_hooks: Option<Rc<dyn MutationHooks>>,
     /// Hooks used to load sub-resources (stylesheets, images, fonts, etc)
-    pub resource_hooks: Option<Arc<dyn ResourceHooks>>,
+    pub resource_hooks: Option<Rc<dyn ResourceHooks>>,
 }
 
 impl Default for HarnessOptions {

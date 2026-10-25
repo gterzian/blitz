@@ -7,7 +7,6 @@ use std::sync::mpsc::Sender;
 use blitz_traits::navigation::{NavigationOptions, NavigationProvider};
 use blitz_traits::net::Url;
 use blitz_traits::node_id::NodeId;
-use blitz_traits::shell::ShellProvider;
 
 use crate::document::DocumentEvent;
 use crate::resource::ResourceRequest;
@@ -27,10 +26,13 @@ pub(crate) struct IframeLoad {
 /// A [`NavigationProvider`] given to iframe sub-documents. It routes
 /// navigations (e.g. link clicks within the iframe) back to the parent
 /// document, which reloads the iframe's sub-document with the new URL.
+///
+/// The parent asks for a redraw once the new document is attached, so this
+/// provider holds nothing but the channel: `NavigationProvider` must be
+/// `Send + Sync`, and the shell provider is thread-affine.
 struct IframeNavigationProvider {
     node_id: NodeId,
     tx: Sender<DocumentEvent>,
-    shell_provider: Arc<dyn ShellProvider>,
 }
 
 impl NavigationProvider for IframeNavigationProvider {
@@ -39,7 +41,6 @@ impl NavigationProvider for IframeNavigationProvider {
             node_id: self.node_id,
             url: options.url,
         });
-        self.shell_provider.request_redraw();
     }
 }
 
@@ -59,7 +60,6 @@ impl BaseDocument {
             navigation_provider: Some(Arc::new(IframeNavigationProvider {
                 node_id,
                 tx: self.tx.clone(),
-                shell_provider: self.shell_provider.clone(),
             })),
             shell_provider: Some(self.shell_provider.clone()),
             html_parser_provider: Some(self.html_parser_provider.clone()),

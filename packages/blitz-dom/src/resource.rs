@@ -9,6 +9,7 @@ use crate::util::ImageType;
 use blitz_traits::net::Bytes;
 use blitz_traits::node_id::NodeId;
 use parley::fontique::FontStyle as FontiqueFontStyle;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use style::{
     font_face::{
@@ -174,8 +175,8 @@ pub(crate) struct PendingStylesheetImport {
 /// The loader stylo calls for `@import` rules while building a stylesheet.
 #[derive(Clone)]
 pub(crate) struct StylesheetLoader {
-    pub(crate) pending_imports: Arc<Mutex<Vec<PendingStylesheetImport>>>,
-    pub(crate) resource_hooks: Arc<dyn ResourceHooks>,
+    pub(crate) pending_imports: Rc<Mutex<Vec<PendingStylesheetImport>>>,
+    pub(crate) resource_hooks: Rc<dyn ResourceHooks>,
     /// Depth of `@import` nesting for the stylesheet this loader is parsing
     /// (0 for a top-level stylesheet).
     pub(crate) import_depth: usize,
