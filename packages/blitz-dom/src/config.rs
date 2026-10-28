@@ -58,7 +58,5 @@ pub struct DocumentConfig {
     pub style_threading: StyleThreading,
     /// When true, `<img>` elements are painted as separate embedded layers by
     /// the embedding application rather than baked into the document's scene.
-    /// Sub-documents (same-origin iframes) keep this false so their images
-    /// stay in the parent's scene.
     pub embedded_images: bool,
 }

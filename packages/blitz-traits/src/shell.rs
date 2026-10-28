@@ -10,6 +10,15 @@ pub struct ClipboardError;
 /// to access that functionality without depending on a specific shell environment.
 pub trait ShellProvider: 'static {
     fn request_redraw(&self) {}
+
+    /// A restyle may have changed the computed style, so the document should be
+    /// repainted if it did. The default repaints unconditionally, which is what
+    /// an embedder that cannot tell a changed style from an unchanged one must
+    /// do; an embedder that runs the resolve pass can repaint only when
+    /// `BaseDocument::resolve` reports a change.
+    fn request_restyle(&self) {
+        self.request_redraw();
+    }
     fn set_cursor(&self, icon: CursorIcon) {
         let _ = icon;
     }

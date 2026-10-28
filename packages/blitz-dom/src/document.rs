@@ -1365,8 +1365,9 @@ impl BaseDocument {
         let cursor = self.get_cursor().unwrap_or_default();
         self.shell_provider.set_cursor(cursor);
 
-        // Request redraw
-        self.shell_provider.request_redraw();
+        // The hover state changed the matching of `:hover`; repaint only if it
+        // changed a computed style.
+        self.shell_provider.request_restyle();
 
         true
     }
@@ -1388,8 +1389,8 @@ impl BaseDocument {
         let cursor = self.get_cursor().unwrap_or_default();
         self.shell_provider.set_cursor(cursor);
 
-        // Request redraw
-        self.shell_provider.request_redraw();
+        // Repaint only if dropping the hover state changed a computed style.
+        self.shell_provider.request_restyle();
 
         true
     }
