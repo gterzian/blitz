@@ -66,8 +66,6 @@ pub struct DocumentConfig {
     pub incremental: Option<bool>,
     /// When true, `<img>` elements are painted as separate embedded layers by
     /// the embedding application rather than baked into the document's scene.
-    /// Sub-documents (same-origin iframes) keep this false so their images
-    /// stay in the parent's scene.
     pub embedded_images: bool,
     /// How deeply this document is nested within other documents
     /// (0 for a root document). Used to limit `<iframe>` nesting depth.

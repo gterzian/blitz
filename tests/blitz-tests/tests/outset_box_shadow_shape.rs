@@ -34,7 +34,7 @@ fn pixels(style: &str) -> Vec<Vec<[u8; 3]>> {
     );
     doc.resolve(0.0);
     let buffer = render_to_buffer::<VelloCpuImageRenderer, _>(
-        |scene| paint_scene(scene, &mut doc, 1.0, W as u32, H as u32, 0, 0),
+        |scene| paint_scene(scene, &doc, 1.0, W as u32, H as u32, 0, 0),
         W as u32,
         H as u32,
     );

@@ -2073,8 +2073,9 @@ impl BaseDocument {
 
         self.hover_node_id = hover_node_id;
 
-        // Request redraw
-        self.shell_provider.request_redraw();
+        // The hover state changed the matching of `:hover`; repaint only if it
+        // changed a computed style.
+        self.shell_provider.request_restyle();
 
         true
     }
@@ -2097,8 +2098,8 @@ impl BaseDocument {
         self.hover_node_id = None;
         self.hover_node_is_text = false;
 
-        // Request redraw
-        self.shell_provider.request_redraw();
+        // Repaint only if dropping the hover state changed a computed style.
+        self.shell_provider.request_restyle();
 
         true
     }

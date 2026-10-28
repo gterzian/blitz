@@ -35,7 +35,7 @@ fn pixel_in(html: &str, scroll: (f64, f64), x: usize, y: usize, scheme: ColorSch
     // user scroll.
     doc.scroll_by(scroller, scroll.0, scroll.1, ScrollBehavior::Instant);
     let buffer = render_to_buffer::<VelloCpuImageRenderer, _>(
-        |scene| paint_scene(scene, &mut doc, 1.0, 100, 100, 0, 0),
+        |scene| paint_scene(scene, &doc, 1.0, 100, 100, 0, 0),
         100,
         100,
     );
@@ -98,7 +98,7 @@ fn stale_scroll_offset_alone_paints_no_thumb() {
     let scroller = doc.query_selector("#scroller").unwrap().expect("#scroller");
     doc.get_node_mut(scroller).unwrap().scroll_offset_mut().y = 50.0;
     let buffer = render_to_buffer::<VelloCpuImageRenderer, _>(
-        |scene| paint_scene(scene, &mut doc, 1.0, 100, 100, 0, 0),
+        |scene| paint_scene(scene, &doc, 1.0, 100, 100, 0, 0),
         100,
         100,
     );

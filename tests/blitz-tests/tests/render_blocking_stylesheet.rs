@@ -7,26 +7,53 @@
 //! visible` -> `hidden`), leaving transitioned properties stuck at their
 //! pre-stylesheet values in one-shot renders.
 
-use blitz_dom::DocumentConfig;
-use blitz_html::HtmlDocument;
-use blitz_traits::net::{Bytes, NetHandler, NetProvider, Request};
-use std::sync::{Arc, Mutex};
-use style::properties::generated::longhands::visibility::computed_value::T as Visibility;
+use std::rc::Rc;
 
-/// A `NetProvider` which records requests so the test can deliver
-/// responses at a time of its choosing.
-#[derive(Default)]
-struct ManualNetProvider {
-    requests: Mutex<Vec<(String, Box<dyn NetHandler>)>>,
+use blitz_dom::resource::{Resource, ResourceLoadResponse};
+use blitz_dom::{DocumentConfig, DocumentEvent, ResourceHooks};
+use blitz_html::HtmlDocument;
+use style::properties::generated::longhands::visibility::computed_value::T as Visibility;
+use style::stylesheets::Origin;
+
+use crate::recording_resource_hooks::{RecordedRequest, RecordingResourceHooks};
+
+/// Install a stylesheet for the request recorded by `hooks`.
+fn install_stylesheet(
+    doc: &mut HtmlDocument,
+    hooks: &RecordingResourceHooks,
+    request: &RecordedRequest,
+    css: &str,
+    response_url: &str,
+) {
+    let sheet = doc.make_stylesheet(css, Origin::Author);
+    doc.handle_message(DocumentEvent::ResourceLoad(ResourceLoadResponse {
+        request_id: request.request_id.unwrap_or(0),
+        node_id: Some(request.node_id),
+        resolved_url: Some(response_url.to_string()),
+        result: Ok(Resource::Css(sheet)),
+    }));
+    let _ = hooks;
 }
 
-impl NetProvider for ManualNetProvider {
-    fn fetch(&self, _doc_id: usize, request: Request, handler: Box<dyn NetHandler>) {
-        self.requests
-            .lock()
-            .unwrap()
-            .push((request.url.to_string(), handler));
-    }
+/// Fail the request recorded by `hooks`.
+fn fail_request(doc: &mut HtmlDocument, request: &RecordedRequest, error: &str) {
+    doc.handle_message(DocumentEvent::ResourceLoad(ResourceLoadResponse {
+        request_id: request.request_id.unwrap_or(0),
+        node_id: Some(request.node_id),
+        resolved_url: Some(request.url.clone()),
+        result: Err(error.to_string()),
+    }));
+}
+
+fn transitioned_visibility(doc: &mut HtmlDocument) -> Visibility {
+    doc.resolve(0.0);
+    let node = doc
+        .get_node(doc.get_element_by_id("transitioned").unwrap())
+        .unwrap();
+    node.primary_styles()
+        .unwrap()
+        .get_inherited_box()
+        .slow_clone_visibility()
 }
 
 const HTML: &str = r#"<!doctype html>
@@ -37,52 +64,54 @@ const HTML: &str = r#"<!doctype html>
 
 const CSS: &str = "#transitioned { transition: all 0.2s; visibility: hidden }";
 
-#[test]
-fn failed_stylesheet_unblocks_rendering() {
-    let net = Arc::new(ManualNetProvider::default());
-    let mut doc = HtmlDocument::from_html(
+fn document(hooks: &Rc<RecordingResourceHooks>) -> HtmlDocument {
+    HtmlDocument::from_html(
         HTML,
         DocumentConfig {
             base_url: Some("http://example.com/".to_string()),
-            net_provider: Some(net.clone()),
+            resource_hooks: Some(Rc::clone(hooks) as Rc<dyn ResourceHooks>),
             ..Default::default()
         },
-    );
+    )
+}
+
+#[test]
+fn failed_stylesheet_unblocks_rendering() {
+    let hooks = Rc::new(RecordingResourceHooks::default());
+    let mut doc = document(&hooks);
     assert!(doc.has_pending_critical_resources());
-    let (url, handler) = net.requests.lock().unwrap().pop().unwrap();
-    handler.error(url, "connection refused".to_string());
-    doc.resolve(0.0);
+
+    let request = hooks.requests().pop().expect("stylesheet requested");
+    assert!(request.url.ends_with("case.css"));
+    fail_request(&mut doc, &request, "connection refused");
+
+    assert_eq!(transitioned_visibility(&mut doc), Visibility::Visible);
     assert!(!doc.has_pending_critical_resources());
     let node = doc
         .get_node(doc.get_element_by_id("transitioned").unwrap())
         .unwrap();
-    assert_eq!(
-        node.primary_styles()
-            .unwrap()
-            .get_inherited_box()
-            .slow_clone_visibility(),
-        Visibility::Visible
-    );
     assert!(node.final_layout().size.height > 0.0);
 }
 
 #[test]
 fn empty_or_non_css_stylesheet_unblocks_rendering() {
     for bytes in [b"".as_slice(), b"<!doctype html><p>not CSS</p>", b"\xff"] {
-        let net = Arc::new(ManualNetProvider::default());
-        let mut doc = HtmlDocument::from_html(
-            HTML,
-            DocumentConfig {
-                base_url: Some("http://example.com/".to_string()),
-                net_provider: Some(net.clone()),
-                ..Default::default()
-            },
-        );
+        let hooks = Rc::new(RecordingResourceHooks::default());
+        let mut doc = document(&hooks);
         assert!(doc.has_pending_critical_resources());
-        let (url, handler) = net.requests.lock().unwrap().pop().unwrap();
-        handler.bytes(url, Bytes::copy_from_slice(bytes));
-        doc.resolve(0.0);
+
+        let request = hooks.requests().pop().expect("stylesheet requested");
+        let css = String::from_utf8_lossy(bytes).into_owned();
+        install_stylesheet(
+            &mut doc,
+            &hooks,
+            &request,
+            &css,
+            "http://example.com/case.css",
+        );
+
         assert!(!doc.has_pending_critical_resources());
+        doc.resolve(0.0);
         let node = doc
             .get_node(doc.get_element_by_id("transitioned").unwrap())
             .unwrap();
@@ -92,46 +121,44 @@ fn empty_or_non_css_stylesheet_unblocks_rendering() {
 
 #[test]
 fn invalid_stylesheet_url_does_not_block_rendering() {
-    let net = Arc::new(ManualNetProvider::default());
+    let hooks = Rc::new(RecordingResourceHooks::default());
     let mut doc = HtmlDocument::from_html(
         &HTML.replace("case.css", "http://[invalid"),
         DocumentConfig {
             base_url: Some("http://example.com/".to_string()),
-            net_provider: Some(net.clone()),
+            resource_hooks: Some(Rc::clone(&hooks) as Rc<dyn blitz_dom::ResourceHooks>),
             ..Default::default()
         },
     );
+
     doc.resolve(0.0);
     assert!(!doc.has_pending_critical_resources());
-    assert!(net.requests.lock().unwrap().is_empty());
+    assert!(hooks.requests().is_empty());
 }
 
 #[test]
 fn transition_does_not_start_from_pre_stylesheet_styles() {
-    let net = Arc::new(ManualNetProvider::default());
+    let hooks = Rc::new(RecordingResourceHooks::default());
+    let mut doc = document(&hooks);
 
-    let mut doc = HtmlDocument::from_html(
-        HTML,
-        DocumentConfig {
-            base_url: Some("http://example.com/".to_string()),
-            net_provider: Some(Arc::clone(&net) as _),
-            ..Default::default()
-        },
-    );
-
-    // The stylesheet fetch should have been issued and be tracked as a
+    // The stylesheet request should have been issued and be tracked as a
     // pending critical resource.
     assert!(doc.has_pending_critical_resources());
 
     // Resolve while the stylesheet is still loading. This must not give
     // elements computed styles (which would later be treated as
     // before-change styles and start spurious transitions).
-    doc.resolve(0.0);
+    assert!(!doc.resolve(0.0), "a blocked resolve changes nothing");
 
     // Deliver the stylesheet and resolve again.
-    let (url, handler) = net.requests.lock().unwrap().pop().expect("css requested");
-    assert!(url.ends_with("case.css"));
-    handler.bytes(url, Bytes::from_static(CSS.as_bytes()));
+    let request = hooks.requests().pop().expect("css requested");
+    install_stylesheet(
+        &mut doc,
+        &hooks,
+        &request,
+        CSS,
+        "http://example.com/case.css",
+    );
     doc.resolve(1.0);
     assert!(!doc.has_pending_critical_resources());
 

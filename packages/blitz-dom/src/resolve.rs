@@ -34,12 +34,14 @@ use crate::{
 };
 
 impl BaseDocument {
-    /// Restyle the tree and then relayout it
-    pub fn resolve(&mut self, current_time_for_animations: f64) {
+    /// Restyle the tree and then relayout it. Returns whether the pass produced
+    /// restyle damage, i.e. whether the computed style of any node changed, so
+    /// the embedder can repaint only when the rendering may have changed.
+    pub fn resolve(&mut self, current_time_for_animations: f64) -> bool {
         if self.root_node().first_element_child().is_none() {
             #[cfg(feature = "tracing")]
             tracing::warn!("No DOM - not resolving");
-            return;
+            return false;
         }
 
         // Process messages that have been sent to our message channel (e.g. loaded resource)
@@ -55,7 +57,7 @@ impl BaseDocument {
         // `handle_messages` above must still run so that loaded resources are ingested and
         // this state can clear.
         if self.has_pending_critical_resources() {
-            return;
+            return false;
         }
 
         self.resolve_scroll_animation();
@@ -121,6 +123,17 @@ impl BaseDocument {
         self.build_paint_tree(root_node_id);
         timer.record_time("paint_tree");
 
+        // Collect the restyle damage the pass produced, before the damage is
+        // cleared below. Stylo records damage only where a node's computed style
+        // actually changed, so this is the "did the rendering change" answer for
+        // the caller.
+        let mut rendering_changed = false;
+        for (_, node) in self.nodes.iter_mut() {
+            if node.damage().is_some_and(|damage| !damage.is_empty()) {
+                rendering_changed = true;
+            }
+        }
+
         // Clear all damage and dirty flags, walking only subtrees which are
         // marked as (potentially) containing damage.
         let doc_node_id = self.root_node().id;
@@ -155,7 +168,7 @@ impl BaseDocument {
                 );
                 drop(sub_viewport);
 
-                sub_doc.resolve(current_time_for_animations);
+                rendering_changed |= sub_doc.resolve(current_time_for_animations);
 
                 subdoc_is_animating |= sub_doc.is_animating();
             }
@@ -164,6 +177,8 @@ impl BaseDocument {
         timer.record_time("subdocs");
 
         timer.print_times(&format!("Resolve({}): ", self.id()));
+
+        rendering_changed
     }
 
     fn resolve_transforms(&mut self, node_id: NodeId, resolve_all: bool) -> Rect {

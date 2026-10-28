@@ -20,7 +20,7 @@ fn center_pixel(html: &str) -> [u8; 3] {
     );
     doc.resolve(0.0);
     let buffer = render_to_buffer::<VelloCpuImageRenderer, _>(
-        |scene| paint_scene(scene, &mut doc, 1.0, 100, 100, 0, 0),
+        |scene| paint_scene(scene, &doc, 1.0, 100, 100, 0, 0),
         100,
         100,
     );

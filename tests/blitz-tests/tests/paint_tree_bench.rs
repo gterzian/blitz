@@ -161,7 +161,7 @@ fn bench_page(name: &'static str, html: &str) -> Row {
 
     let mut scene = NullScenePainter;
     let render = time_median(50, || {
-        blitz_paint::paint_scene(&mut scene, &mut doc, 1.0, WIDTH, HEIGHT, 0, 0);
+        blitz_paint::paint_scene(&mut scene, &doc, 1.0, WIDTH, HEIGHT, 0, 0);
     });
 
     // Hover-only incremental frame: alternate hovering `#hover` (colour
@@ -287,7 +287,7 @@ fn external_page_timings() {
 
     let mut scene = NullScenePainter;
     let render = time_median(20, || {
-        blitz_paint::paint_scene(&mut scene, &mut doc, 1.0, WIDTH, HEIGHT, 0, 0);
+        blitz_paint::paint_scene(&mut scene, &doc, 1.0, WIDTH, HEIGHT, 0, 0);
     });
 
     let anchor = doc
