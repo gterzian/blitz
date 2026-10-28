@@ -19,7 +19,6 @@ use blitz_html::HtmlDocument;
 use blitz_shell::{
     BlitzApplication, BlitzShellProxy, Config, EventLoop, WindowConfig, create_default_event_loop,
 };
-use blitz_traits::net::NetProvider;
 
 #[doc(inline)]
 /// Re-export of [`blitz_dom`].
@@ -75,7 +74,6 @@ pub fn launch_url(url: &str) {
         },
         event_loop,
         application,
-        net_provider,
     )
 }
 
@@ -97,10 +95,9 @@ pub fn launch_static_html_cfg(html: &str, cfg: Config) {
 
     let event_loop = create_default_event_loop();
     let (proxy, reciever) = BlitzShellProxy::new(event_loop.create_proxy());
-    let net_provider = create_net_provider(proxy.clone());
     let application = BlitzApplication::new(proxy, reciever);
 
-    launch_internal(html, cfg, event_loop, application, net_provider)
+    launch_internal(html, cfg, event_loop, application)
 }
 
 fn launch_internal(
@@ -108,14 +105,12 @@ fn launch_internal(
     cfg: Config,
     event_loop: EventLoop,
     mut application: BlitzApplication<WindowRenderer>,
-    net_provider: Arc<dyn NetProvider>,
 ) {
     let doc = HtmlDocument::from_html(
         html,
         DocumentConfig {
             base_url: cfg.base_url,
             ua_stylesheets: Some(cfg.stylesheets),
-            net_provider: Some(net_provider),
             ..Default::default()
         },
     );

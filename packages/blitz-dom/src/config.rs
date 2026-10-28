@@ -1,10 +1,11 @@
 use crate::HtmlParserProvider;
+use crate::resource::{MutationHooks, ResourceHooks};
 use blitz_traits::{
     navigation::NavigationProvider,
-    net::{AbortSignal, NetProvider},
     shell::{ShellProvider, Viewport},
 };
 use parley::FontContext;
+use std::rc::Rc;
 use std::sync::Arc;
 use style::media_queries::MediaType;
 
@@ -37,8 +38,10 @@ pub struct DocumentConfig {
     pub base_url: Option<String>,
     /// User Agent stylesheets
     pub ua_stylesheets: Option<Vec<String>>,
-    /// Net provider to handle network requests for resources
-    pub net_provider: Option<Arc<dyn NetProvider>>,
+    /// Hooks that receive the document's DOM mutation notifications.
+    pub mutation_hooks: Option<Rc<dyn MutationHooks>>,
+    /// Hooks that receive the document's subresource requests.
+    pub resource_hooks: Option<Rc<dyn ResourceHooks>>,
     /// Navigation provider to handle link clicks and form submissions
     pub navigation_provider: Option<Arc<dyn NavigationProvider>>,
     /// Shell provider to redraw requests, clipboard, etc
@@ -53,8 +56,7 @@ pub struct DocumentConfig {
     /// Strategy for Stylo's style traversal.
     /// Defaults to [`StyleThreading::Parallel`].
     pub style_threading: StyleThreading,
-    /// If set, every sub-resource `Request` blitz-dom creates for this
-    /// document will carry this signal. Aborting it cancels every in-flight
-    /// fetch tied to this document.
-    pub abort_signal: Option<AbortSignal>,
+    /// When true, `<img>` elements are painted as separate embedded layers by
+    /// the embedding application rather than baked into the document's scene.
+    pub embedded_images: bool,
 }

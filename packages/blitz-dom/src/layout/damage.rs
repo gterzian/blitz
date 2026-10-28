@@ -1,10 +1,8 @@
 use std::ops::Range;
 
-use crate::net::ResourceHandler;
 use crate::node::NodeFlags;
-use crate::{
-    BaseDocument, net::ImageHandler, node::ImageResourceData, node::Status, util::ImageLayerKind,
-};
+use crate::resource::ResourceRequest;
+use crate::{BaseDocument, node::ImageResourceData, node::Status, util::ImageLayerKind};
 use crate::{NON_INCREMENTAL, Node};
 use style::properties::ComputedValues;
 use style::properties::generated::longhands::position::computed_value::T as Position;
@@ -373,7 +371,7 @@ impl BaseDocument {
     /// Flush a CSS image layer list (`background-image` or `mask-image`) from style
     /// to dedicated storage on the node, fetching any images which are not yet loaded.
     fn flush_image_layers_from_style(&mut self, node_id: usize, kind: ImageLayerKind) {
-        let doc_id = self.id();
+        let hooks = self.resource_hooks.clone();
         let node = self.nodes.get_mut(node_id).unwrap();
         let stylo_element_data = node.stylo_element_data.get();
         let primary_styles = stylo_element_data
@@ -430,20 +428,11 @@ impl BaseDocument {
                         self.pending_images
                             .insert(url_str.to_string(), vec![(node_id, kind.image_type(idx))]);
 
-                        self.net_provider.fetch(
-                            doc_id,
-                            crate::net::stamped_request(
-                                (**new_url).clone(),
-                                self.abort_signal.as_ref(),
-                            ),
-                            ResourceHandler::boxed(
-                                self.tx.clone(),
-                                doc_id,
-                                None, // Don't pass node_id, we'll handle via pending_images
-                                self.shell_provider.clone(),
-                                ImageHandler::new(kind.image_type(idx)),
-                            ),
-                        );
+                        hooks.resource_request(ResourceRequest::Image {
+                            node_id,
+                            url: (**new_url).clone(),
+                            image_type: kind.image_type(idx),
+                        });
 
                         Some(ImageResourceData::new(new_url.clone()))
                     }
@@ -487,8 +476,10 @@ impl BaseDocument {
                 .data
                 .downcast_element()
                 .map(|element| {
-                    matches!(element.name.local.as_ref(), "img" | "canvas" | "iframe" | "frame")
-                        || (cfg!(feature = "svg") && element.name.local.as_ref() == "svg")
+                    matches!(
+                        element.name.local.as_ref(),
+                        "img" | "canvas" | "iframe" | "frame"
+                    ) || (cfg!(feature = "svg") && element.name.local.as_ref() == "svg")
                 })
                 .unwrap_or(false);
             node.display_constructed_as = style.clone_display();

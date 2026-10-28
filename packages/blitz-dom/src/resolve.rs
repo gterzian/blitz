@@ -38,19 +38,18 @@ use crate::{
 };
 
 impl BaseDocument {
-    /// Restyle the tree and then relayout it
-    pub fn resolve(&mut self, current_time_for_animations: f64) {
+    /// Restyle the tree and then relayout it. Returns whether the pass produced
+    /// restyle damage, i.e. whether the computed style of any node changed, so
+    /// the embedder can repaint only when the rendering may have changed.
+    pub fn resolve(&mut self, current_time_for_animations: f64) -> bool {
         if TDocument::as_node(&&self.nodes[0])
             .first_element_child()
             .is_none()
         {
             #[cfg(feature = "tracing")]
             tracing::warn!("No DOM - not resolving");
-            return;
+            return false;
         }
-
-        // Process messages that have been sent to our message channel (e.g. loaded resource)
-        self.handle_messages();
 
         self.resolve_scroll_animation();
 
@@ -85,11 +84,24 @@ impl BaseDocument {
         self.resolve_transforms(root_node_id);
         timer.record_time("transform");
 
+        // Collect (and clear) the restyle damage the pass produced. Stylo
+        // records damage only where a node's computed style actually changed,
+        // so this is the "did the rendering change" answer for the caller. The
+        // damage is cleared here in both builds: with `incremental` the layout
+        // pass above has already consumed it, and without it nothing else
+        // would ever clear it.
+        let mut rendering_changed = false;
+        for (_, node) in self.nodes.iter_mut() {
+            if node.damage().is_some_and(|damage| !damage.is_empty()) {
+                rendering_changed = true;
+            }
+            node.clear_damage_mut();
+        }
+
         // Clear all damage and dirty flags
         #[cfg(feature = "incremental")]
         {
             for (_, node) in self.nodes.iter_mut() {
-                node.clear_damage_mut();
                 node.unset_dirty_descendants();
             }
             timer.record_time("c_damage");
@@ -114,7 +126,7 @@ impl BaseDocument {
                 );
                 drop(sub_viewport);
 
-                sub_doc.resolve(current_time_for_animations);
+                rendering_changed |= sub_doc.resolve(current_time_for_animations);
 
                 subdoc_is_animating |= sub_doc.is_animating();
             }
@@ -123,6 +135,8 @@ impl BaseDocument {
         timer.record_time("subdocs");
 
         timer.print_times(&format!("Resolve({}): ", self.id()));
+
+        rendering_changed
     }
 
     fn resolve_transforms(&mut self, node_id: usize) -> Rect {
