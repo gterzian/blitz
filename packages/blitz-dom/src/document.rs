@@ -1360,8 +1360,6 @@ impl BaseDocument {
         self.rx = Some(rx);
     }
 
-    /// Stops waiting for the stylesheet reported for `node_id` (for example
-    /// one whose fetch failed).
     /// Stops waiting for a resource reported with a `request_id` that will
     /// not be installed (for example a stylesheet whose fetch failed).
     pub fn cancel_pending_resource(&mut self, request_id: usize) {
