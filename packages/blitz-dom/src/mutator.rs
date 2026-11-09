@@ -474,6 +474,64 @@ impl DocumentMutator<'_> {
         node
     }
 
+    /// Drops the slab entries of a detached subtree whose nodes no wrapper
+    /// can reach.
+    ///
+    /// The caller must have established that `node_id` exists, has no parent,
+    /// and is not the document node. The removing steps ran when the subtree
+    /// was detached, so this drops the nodes without running mutation hooks.
+    pub fn drop_detached_subtree(&mut self, node_id: usize) {
+        assert_ne!(node_id, 0, "the document node is never a detached subtree");
+        assert!(
+            self.doc.nodes.contains(node_id),
+            "cannot drop a subtree rooted at a missing node"
+        );
+        assert!(
+            self.doc.nodes[node_id].parent.is_none(),
+            "cannot drop a subtree rooted at a node that still has a parent"
+        );
+
+        let mut node_ids = Vec::new();
+        collect_subtree_and_pseudo_node_ids(&self.doc.nodes, node_id, &mut node_ids);
+        for dropped_id in node_ids.iter().copied() {
+            self.clear_node_id_keyed_state(dropped_id);
+        }
+        for dropped_id in node_ids {
+            self.doc.nodes.try_remove(dropped_id);
+        }
+    }
+
+    fn clear_node_id_keyed_state(&mut self, node_id: usize) {
+        let doc = &mut self.doc;
+        doc.changed_nodes.remove(&node_id);
+        doc.sub_document_nodes.remove(&node_id);
+        #[cfg(feature = "custom-widget")]
+        doc.custom_widget_nodes.remove(&node_id);
+        doc.controls_to_form
+            .retain(|control_id, form_id| *control_id != node_id && *form_id != node_id);
+        doc.pending_critical_resources.remove(&node_id);
+        doc.nodes_to_id.retain(|_, owner_id| *owner_id != node_id);
+        doc.nodes_to_stylesheet.remove(&node_id);
+        doc.deferred_construction_nodes
+            .retain(|task| task.node_id != node_id);
+        for waiting_nodes in doc.pending_images.values_mut() {
+            waiting_nodes.retain(|(waiting_id, _)| *waiting_id != node_id);
+        }
+        if doc.hover_node_id == Some(node_id) {
+            doc.hover_node_id = None;
+            doc.hover_node_is_text = false;
+        }
+        if doc.focus_node_id == Some(node_id) {
+            doc.focus_node_id = None;
+        }
+        if doc.active_node_id == Some(node_id) {
+            doc.active_node_id = None;
+        }
+        if doc.mousedown_node_id == Some(node_id) {
+            doc.mousedown_node_id = None;
+        }
+    }
+
     pub fn remove_and_drop_all_children(&mut self, node_id: usize) {
         let parent = &mut self.doc.nodes[node_id];
         let parent_is_in_doc = parent.flags.is_in_document();
@@ -1055,6 +1113,30 @@ impl Drop for ViewportMut<'_> {
     }
 }
 
+fn collect_subtree_node_ids(nodes: &Slab<Node>, node_id: usize, node_ids: &mut Vec<usize>) {
+    node_ids.push(node_id);
+    for child_id in nodes[node_id].children.iter().copied() {
+        collect_subtree_node_ids(nodes, child_id, node_ids);
+    }
+}
+
+fn collect_subtree_and_pseudo_node_ids(
+    nodes: &Slab<Node>,
+    node_id: usize,
+    node_ids: &mut Vec<usize>,
+) {
+    node_ids.push(node_id);
+    for pseudo_id in [nodes[node_id].before, nodes[node_id].after]
+        .into_iter()
+        .flatten()
+    {
+        collect_subtree_and_pseudo_node_ids(nodes, pseudo_id, node_ids);
+    }
+    for child_id in nodes[node_id].children.iter().copied() {
+        collect_subtree_and_pseudo_node_ids(nodes, child_id, node_ids);
+    }
+}
+
 #[cfg(test)]
 mod test {
     use style::media_queries::MediaType;
@@ -1188,11 +1270,105 @@ mod test {
             "form node is enabled"
         );
     }
-}
 
-fn collect_subtree_node_ids(nodes: &Slab<Node>, node_id: usize, node_ids: &mut Vec<usize>) {
-    node_ids.push(node_id);
-    for child_id in nodes[node_id].children.iter().copied() {
-        collect_subtree_node_ids(nodes, child_id, node_ids);
+    fn build_detached_subtree(document: &mut BaseDocument) -> (usize, usize, usize) {
+        let (container_id, child_id, text_id) = {
+            let mut mutator = document.mutate();
+            let container_id = mutator.create_element(qual_name!("div"), vec![]);
+            let child_id = mutator.create_element(qual_name!("span"), vec![]);
+            let text_id = mutator.create_text_node("text");
+            mutator.append_children(container_id, &[child_id]);
+            mutator.append_children(child_id, &[text_id]);
+            (container_id, child_id, text_id)
+        };
+        document.mutate().remove_node(container_id);
+        (container_id, child_id, text_id)
+    }
+
+    #[test]
+    fn drop_detached_subtree_frees_elements_and_text_nodes() {
+        let mut document = BaseDocument::new(DocumentConfig::default());
+        let (container_id, child_id, text_id) = build_detached_subtree(&mut document);
+
+        document.mutate().drop_detached_subtree(container_id);
+
+        assert!(document.get_node(container_id).is_none());
+        assert!(document.get_node(child_id).is_none());
+        assert!(document.get_node(text_id).is_none());
+        assert!(!document.changed_nodes.contains(&container_id));
+        assert!(!document.changed_nodes.contains(&child_id));
+        assert!(!document.changed_nodes.contains(&text_id));
+    }
+
+    #[test]
+    fn drop_detached_subtree_frees_pseudo_element_nodes() {
+        let mut document = BaseDocument::new(DocumentConfig::default());
+        let (container_id, child_id, _) = build_detached_subtree(&mut document);
+        let before_id = document.create_text_node("before");
+        let after_id = document.create_text_node("after");
+        {
+            let container = document.get_node_mut(container_id).unwrap();
+            container.before = Some(before_id);
+            container.after = Some(after_id);
+        }
+
+        document.mutate().drop_detached_subtree(container_id);
+
+        assert!(document.get_node(container_id).is_none());
+        assert!(document.get_node(child_id).is_none());
+        assert!(document.get_node(before_id).is_none());
+        assert!(document.get_node(after_id).is_none());
+    }
+
+    #[test]
+    fn drop_detached_subtree_clears_id_keyed_state() {
+        let mut document = BaseDocument::new(DocumentConfig::default());
+        let (container_id, child_id, _) = build_detached_subtree(&mut document);
+        document.controls_to_form.insert(child_id, container_id);
+        document.pending_critical_resources.insert(container_id);
+        document.sub_document_nodes.insert(child_id);
+        document.focus_node_id = Some(container_id);
+        document.active_node_id = Some(child_id);
+        document.mousedown_node_id = Some(container_id);
+        document.hover_node_id = Some(child_id);
+        document.hover_node_is_text = true;
+
+        document.mutate().drop_detached_subtree(container_id);
+
+        assert!(document.controls_to_form.is_empty());
+        assert!(document.pending_critical_resources.is_empty());
+        assert!(document.sub_document_nodes.is_empty());
+        assert_eq!(document.focus_node_id, None);
+        assert_eq!(document.active_node_id, None);
+        assert_eq!(document.mousedown_node_id, None);
+        assert_eq!(document.hover_node_id, None);
+        assert!(!document.hover_node_is_text);
+    }
+
+    #[test]
+    #[should_panic(expected = "document node")]
+    fn drop_detached_subtree_rejects_the_document_node() {
+        let mut document = BaseDocument::new(DocumentConfig::default());
+        document.mutate().drop_detached_subtree(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "still has a parent")]
+    fn drop_detached_subtree_rejects_an_attached_node() {
+        let mut document = BaseDocument::new(DocumentConfig::default());
+        let element_id = {
+            let mut mutator = document.mutate();
+            let element_id = mutator.create_element(qual_name!("div"), vec![]);
+            mutator.append_children(0, &[element_id]);
+            element_id
+        };
+        document.mutate().drop_detached_subtree(element_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "missing node")]
+    fn drop_detached_subtree_rejects_a_missing_node() {
+        let mut document = BaseDocument::new(DocumentConfig::default());
+        document.mutate().drop_detached_subtree(999);
     }
 }
