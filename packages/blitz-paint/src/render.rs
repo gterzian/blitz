@@ -1392,6 +1392,14 @@ impl ElementCx<'_, '_> {
         if self.context.dom.embedded_images() && self.element.name.local == local_name!("img") {
             return;
         }
+        // An element can carry image data for its intrinsic size alone, with no
+        // pixel buffer, because the embedder paints its pixels itself (a video
+        // frame, for one). Such data has nothing to draw.
+        if let Some(image) = self.element.raster_image_data()
+            && image.data.is_empty()
+        {
+            return;
+        }
         if let Some(image) = self.element.raster_image_data() {
             let content_box = self.frame.content_box();
             let width = content_box.width() as u32;
